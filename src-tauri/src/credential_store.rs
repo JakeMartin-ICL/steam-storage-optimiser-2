@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::io::{ErrorKind, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SavedLogin {
@@ -38,20 +37,11 @@ pub async fn save_login(login: SavedLogin) -> Result<(), String> {
             .ok_or_else(|| "Development session path has no parent directory".to_string())?;
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("Could not create the session directory: {error}"))?;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("Could not protect the session directory: {error}"))?;
+        protect_session_directory(parent)?;
 
         let encoded = serde_json::to_vec(&login)
             .map_err(|_| "Could not encode the development Steam session".to_string())?;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|error| format!("Could not open the session file: {error}"))?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Could not protect the session file: {error}"))?;
+        let mut file = open_session_file(&path)?;
         file.write_all(&encoded)
             .map_err(|error| format!("Could not save the development Steam session: {error}"))
     })
@@ -69,6 +59,43 @@ pub async fn delete_saved_login() -> Result<(), String> {
     })
     .await
     .map_err(|error| format!("Session-file task failed: {error}"))?
+}
+
+#[cfg(unix)]
+fn protect_session_directory(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("Could not protect the session directory: {error}"))
+}
+
+#[cfg(windows)]
+fn protect_session_directory(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn open_session_file(path: &Path) -> Result<std::fs::File, String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let file = options
+        .open(path)
+        .map_err(|error| format!("Could not open the session file: {error}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Could not protect the session file: {error}"))?;
+    }
+
+    Ok(file)
 }
 
 fn session_path() -> Result<PathBuf, String> {

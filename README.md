@@ -54,9 +54,10 @@ The app records the last contributed local size and only reconsiders a game
 after its `SizeOnDisk` changes by at least 100 MiB. Depot estimates never enter
 the contribution path.
 
-The current development build stores the Steam refresh token in the local
-application-data directory with user-only file permissions. This convenience
-cache should be replaced with production credential storage before release.
+The current development build stores the Steam refresh token in the per-user
+local application-data directory, with explicit user-only file permissions on
+Unix systems. This convenience cache should be replaced with production
+credential storage before release.
 
 ## Development
 
@@ -81,6 +82,61 @@ Create a production bundle:
 
 ```sh
 npm run tauri build
+```
+
+## Releases
+
+Pushing a version tag builds a draft GitHub Release containing:
+
+- an x64 NSIS installer (`.exe`) for Windows;
+- separate Apple Silicon and Intel disk images (`.dmg`) for macOS; and
+- an x64 AppImage plus Debian package (`.deb`) for Linux.
+
+The tag must match the version in `src-tauri/tauri.conf.json`. For example:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The initial macOS artifacts use an ad-hoc signature. Windows and macOS
+production signing can be added to the release workflow through repository
+secrets before publishing the draft.
+
+## Installation
+
+Download the latest bundle for your operating system from the project's GitHub
+Releases page.
+
+### Windows
+
+Download and run the `.exe` installer. Windows may show a SmartScreen warning
+until production code signing is configured.
+
+### macOS
+
+Choose the Apple Silicon DMG for Macs with an M-series processor, or the Intel
+DMG for older Macs. Open the `.dmg` and drag Steam Storage Optimiser into the
+Applications folder.
+
+The current builds are ad-hoc signed rather than Apple-notarized. On first
+launch, macOS may require you to open **System Settings → Privacy & Security**
+and choose **Open Anyway**.
+
+### Linux
+
+The AppImage runs without installation on most distributions:
+
+```sh
+chmod +x Steam.Storage.Optimiser_*.AppImage
+./Steam.Storage.Optimiser_*.AppImage
+```
+
+On Debian, Ubuntu, and compatible distributions, install the `.deb` package
+instead:
+
+```sh
+sudo apt install ./steam-storage-optimiser_*.deb
 ```
 
 Run all automated checks:
