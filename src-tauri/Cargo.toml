@@ -1,0 +1,35 @@
+[package]
+name = "steam-storage-optimiser"
+version = "0.1.0"
+description = "A local-first Steam library storage analyser"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "steam_storage_optimiser_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+base64 = "0.22"
+bytes = "1"
+dirs-next = "2"
+fs4 = { version = "1", features = ["sync"] }
+prost = "0.14"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+reqwest = { version = "0.13", features = ["json", "query"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+steamroom = { version = "0.3.0", features = ["serde"] }
+steamroom-client = { version = "0.3.0", features = ["serde"] }
+tokio = { version = "1", features = ["sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
