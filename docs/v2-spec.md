@@ -1,599 +1,257 @@
-# Steam Storage Optimiser v2 — Product and Implementation Specification
+# Steam Storage Optimiser v2 — Project Brief
 
-Status: initial handoff specification
+Status: handoff brief
 
 Date: 2026-07-27
 
 Legacy repository: <https://github.com/JakeMartin-ICL/steam-storage-optimiser>
 
-Legacy local path at the time of handoff:
+Legacy local path at handoff:
 `/Users/jakemartin/Projects/steam-storage-optimiser`
 
-## 1. Context for a new Codex task
+## 1. What this project is
 
-Steam Storage Optimiser helps someone decide which games deserve space on
-their computer. Its central metric is **lifetime hours played per GB of
-installed size**. Despite an early conversational typo, price is not part of
-the metric.
+Steam Storage Optimiser helps users decide which games deserve disk space. Its
+main metric is **lifetime hours played per GB of installed size**.
 
-The legacy application is a small Python terminal program. It:
+The legacy Python terminal application:
 
-1. asks for a Steam Web API key, SteamID64, and Steam installation path;
-2. calls `IPlayerService/GetOwnedGames` for names and lifetime playtime;
-3. discovers Steam library folders from `libraryfolders.vdf`;
-4. reads installed `appmanifest_*.acf` files and their `SizeOnDisk`;
-5. obtains estimates for uninstalled games from a crowdsourced AWS database;
-6. uploads newly observed or substantially changed installed sizes; and
-7. prints a table sorted by hours played per byte, with cumulative size and
-   playtime.
+- retrieves the user's owned games and lifetime playtime through the Steam Web
+  API;
+- finds installed games through Steam's local library and app manifests;
+- uses each installed app manifest's `SizeOnDisk`;
+- estimates uninstalled games through an existing crowdsourced AWS service;
+- contributes observed installed sizes to that service; and
+- displays a table sorted by hours per GB.
 
-The relevant legacy implementation is in
-`src/steamStorageOptimiser.py`. The old repository should remain intact: it is
-a working historical project with its own Python packaging and release setup.
-This v2 repository is intentionally separate.
+This repository is a clean successor rather than a migration. Preserve the
+legacy repository as a working historical project with its Python packaging and
+release setup.
 
-The desired successor is a Tauri 2 desktop application for Windows, macOS, and
-Linux. It should remain local-first, replace the terminal table with a useful
-GUI, avoid asking users to find a SteamID manually, and preferably avoid asking
-for a Steam Web API key.
+The intended v2 is a local-first Tauri 2 desktop application for Windows,
+macOS, and Linux. It should offer a useful GUI, discover local Steam data, and
+reduce the setup required from the user.
 
-The most important new technical hypothesis is:
+## 2. Product decisions
 
-> A Steam client-protocol login can retrieve the user's owned library and
-> playtime locally, while Steam depot manifests can provide uncompressed base
-> install sizes for uninstalled games. The existing crowdsourced database
-> remains valuable for launcher/bootstrapper games and other cases where Steam
-> depot content does not represent the eventual installed footprint.
+- The metric remains hours played per GB. Price is not involved.
+- Use Tauri 2 and target Windows, macOS, and Linux.
+- Installed games use the local Steam app manifest's `SizeOnDisk`.
+- Uninstalled games should use both Steam depot estimates and the existing
+  crowdsourced estimate when available.
+- Do not use Steam store system requirements as a size source.
+- Let users choose between depot and community values, and offer a comparison
+  or range view. Do not silently average the two.
+- Depot estimates must use uncompressed installed-file sizes, not compressed
+  download sizes.
+- Include owned DLC that Steam would normally install with the game when this
+  can be determined reliably.
+- Keep the existing crowdsourcing Lambda and its API unchanged. Adapting,
+  migrating, or replacing that backend is outside the scope of v2.
 
-Do not begin by implementing the entire product. Begin with the feasibility
-spike in section 12.
+## 3. Desired user experience
 
-## 2. Decisions already made
+The ideal application:
 
-These are product decisions, not suggestions:
+1. finds the local Steam installation and library folders;
+2. signs the user in, preferably without asking for a Web API key or SteamID;
+3. retrieves owned games and lifetime playtime;
+4. shows exact local sizes for installed games;
+5. estimates uninstalled games from Steam depots;
+6. also shows the existing community estimate where one exists; and
+7. makes uncertainty and disagreement between sources understandable.
 
-- The metric is hours played per GB.
-- The new application will use Tauri 2.
-- Windows, macOS, and Linux are all target platforms.
-- v2 lives in this separate repository; do not restructure the legacy repo.
-- Steam store system requirements are not a size source. They are too stale,
-  inconsistent, and free-form.
-- Installed games use the local Steam manifest's actual `SizeOnDisk`.
-- Uninstalled games should use both:
-  - a depot-manifest estimate; and
-  - the crowdsourced installed-size database, where available.
-- Users must be able to compare or switch between depot and community sizes.
-- Depot download/compressed bytes must never be used as installed size.
-  Use manifest uncompressed file sizes.
-- Owned DLC that Steam would normally install must be included in the depot
-  estimate where possible.
-- The existing crowdsourced AWS service should be retained, though its schema
-  and API may later be versioned or improved.
+It must not install, uninstall, move, or modify games. Reading Steam's files and
+retrieving metadata should be enough.
 
-## 3. Explicit non-goals for the first usable release
+## 4. Authentication direction
 
-- Game purchase price or price-per-GB.
-- Downloading game content.
-- Installing, uninstalling, moving, or modifying Steam games.
-- Replacing Steam's storage manager.
-- Scraping SteamDB.
-- Treating Steam store requirements as a fallback.
-- Counting workshop content, mods, shader caches, saves, or arbitrary
-  post-install launcher downloads as if Steam manifests knew their size.
-- Mobile platforms.
+The preferred hypothesis is a fully local Steam client-protocol login, ideally
+using QR approval through the official Steam Mobile app. This may allow the app
+to retrieve the owned library, lifetime playtime, licenses, product metadata,
+and depot manifests without a backend or user-supplied API key.
 
-## 4. Authentication and library retrieval
+This needs a bounded feasibility investigation before committing the product to
+it. Native Rust libraries may work, while SteamKit2 in a sidecar is a possible
+fallback. The next agent should research the current options and choose based on
+working evidence, security, maintenance, licensing, and packaging impact rather
+than treating any library named here as mandatory.
 
-### 4.1 Preferred direction: Steam client-protocol QR login
+If local protocol login is impractical, the pragmatic fallback is:
 
-The feasibility spike should first test a local Steam client-protocol session:
+- detect SteamID values from Steam's local `config/loginusers.vdf`; and
+- ask the user only for their Steam Web API key.
 
-1. generate a QR login challenge;
-2. display it to the user;
-3. let the user approve it in the official Steam Mobile application;
-4. receive a Steam client refresh token without handling the password;
-5. connect with a distinct logon ID so the normal Steam client is not replaced;
-6. retrieve the authenticated account's owned applications and lifetime
-   playtime;
-7. retrieve licenses/owned depots and PICS product metadata; and
-8. retrieve current public-branch depot manifests without content chunks.
+This still halves the legacy setup. OpenID plus a centrally held API key is
+possible but adds backend maintenance and is not preferred.
 
-Potential implementations to evaluate:
+Security constraints:
 
-- `steam-cm-protocol` for native Rust QR authentication, library/playtime, and
-  PICS metadata:
-  <https://docs.rs/steam-cm-protocol/latest/steam_cm_protocol/>
-- `steamroom` for native Rust authentication, manifest parsing, and Steam CDN
-  access:
-  <https://docs.rs/steamroom/latest/steamroom/>
-- SteamKit2 as the established fallback:
-  <https://github.com/SteamRE/SteamKit>
-- DepotDownloader as behavioral reference, especially for depot filtering and
-  manifest retrieval:
-  <https://github.com/SteamRE/DepotDownloader>
+- Never ask for, handle, or store a Steam password.
+- Never log or persist tokens or API keys in plaintext.
+- Keep credentials out of the webview.
+- Avoid disrupting the user's normal Steam client session.
+- If persistent login is eventually offered, make it explicit and use the
+  operating system credential store.
+- Provide a real logout that removes retained credentials.
 
-The Rust libraries are currently young `0.x` projects. Inspect their source,
-maintenance state, licenses, protocol coverage, and interoperability before
-adopting them. If the native path is unreliable, document that finding and
-prototype a small self-contained SteamKit2 sidecar rather than forcing an
-unstable Rust solution.
+## 5. Local Steam data
 
-### 4.2 Fallback: user API key with automatic SteamID detection
+Use Steam's own files instead of scanning arbitrary disks:
 
-If Steam client-protocol login is rejected or temporarily unavailable, retain a
-fallback that:
-
-- detects locally known accounts from Steam's `config/loginusers.vdf`;
-- lets the user choose an account if several exist; and
-- asks only for the user's Steam Web API key.
-
-This removes the legacy application's manual SteamID lookup.
-
-### 4.3 Deferred fallback: OpenID plus AWS-held API key
-
-An OpenID/backend design is possible but should not be built until the local
-Steam protocol spike has been assessed.
-
-A regular Steam Web API key is a caller/application credential, not a token
-restricted to the key owner's SteamID. `GetOwnedGames` can query another
-SteamID when that account's Game Details are visible to the key owner. A
-centrally held key would normally require public Game Details. Valve publishes
-a limit of 100,000 Web API calls per key per day, which is ample for the
-expected scale.
-
-References:
-
-- <https://partner.steamgames.com/doc/webapi/IPlayerService>
-- <https://steamcommunity.com/dev/apiterms>
-- <https://steamcommunity.com/dev>
-
-Never embed a shared Steam Web API key in a distributed desktop binary.
-
-## 5. Authentication security requirements
-
-A Steam client refresh token is substantially more sensitive than OpenID,
-which returns only a SteamID.
-
-- Never collect or store a Steam password.
-- QR approval through Steam Mobile is the preferred login.
-- Default to an ephemeral session during the spike.
-- If persistent login is later offered, make it an explicit “Remember this
-  account” choice and store the token through the operating system credential
-  store:
-  - Windows Credential Manager;
-  - macOS Keychain;
-  - Secret Service-compatible storage on Linux.
-- Never write refresh tokens, access tokens, cookies, API keys, or depot keys
-  to logs, telemetry, frontend state persistence, plaintext JSON, crash
-  reports, or test fixtures.
-- Keep sensitive Steam state in the Rust/backend process and expose only narrow
-  typed Tauri commands to the webview.
-- Use a distinct Steam logon ID so the existing Steam client session is not
-  displaced.
-- Provide logout that disconnects and deletes locally retained credentials.
-- Explain in the UI that QR approval authorizes this application as a Steam
-  client session.
-- Treat frontend injection as capable of invoking allowed Tauri commands.
-  Minimize command capabilities and validate every argument in Rust.
-
-## 6. Local Steam discovery
-
-Implement platform-specific discovery behind a common interface.
-
-Expected default roots:
-
-- Windows: Steam registry locations, then common Program Files paths.
-- macOS: `~/Library/Application Support/Steam`.
-- Linux: common native, distro, and user-data locations such as
-  `~/.steam/steam` and `~/.local/share/Steam`.
-
-Use Steam files rather than recursively scanning arbitrary disks:
-
-- `config/loginusers.vdf` for locally known accounts;
-- `steamapps/libraryfolders.vdf` for library roots;
+- `config/loginusers.vdf` for known local accounts;
+- `steamapps/libraryfolders.vdf` for library locations; and
 - `steamapps/appmanifest_<appid>.acf` for installed state and `SizeOnDisk`.
 
-Support missing/offline external libraries without failing the whole scan.
-Filesystem access is read-only. Tauri filesystem/IPC permissions should be
-limited to the required Steam locations and application-owned configuration.
+Discovery must account for conventional Steam locations on each target
+platform and tolerate missing or disconnected external libraries. Filesystem
+access should be read-only and narrowly scoped.
 
-## 7. Size domain model
+## 6. Size sources and presentation
 
-Do not reduce all size data to one unexplained integer. A game may have:
+### Installed games
 
-```text
-InstalledObservation
-  app_id
-  bytes
-  library_path
-  build_id?
-  observed_at
+The local `SizeOnDisk` observation is authoritative for the current
+installation. Depot and community figures can still be shown for comparison.
 
-DepotEstimate
-  app_id
-  bytes_uncompressed
-  platform
-  architecture
-  language
-  public_build_id
-  selected_depot_ids
-  included_dlc_app_ids
-  manifest_ids
-  calculated_at
-  warnings[]
+### Uninstalled games
 
-CommunityEstimate
-  app_id
-  representative_bytes
-  platform?
-  architecture?
-  build_id?
-  observed_at?
-  sample_count?
-  lower_percentile_bytes?
-  upper_percentile_bytes?
-  legacy: boolean
-```
+Use two independent estimates where possible:
 
-All byte arithmetic should use integers. Format only at the presentation layer.
-Keep the legacy binary GB convention (`1 GiB = 1,073,741,824 bytes`) unless the
-UI explicitly labels decimal units.
+- **Depot**: the logical uncompressed size derived from the Steam depots that
+  would be installed for the user's platform and configuration.
+- **Community**: the existing historical installed-size value returned by the
+  crowdsourcing API.
 
-### 7.1 User-selectable display modes
+The community value can catch launcher or bootstrapper games whose Steam depot
+is only a small installer. It can also be stale, or reflect a different
+platform, DLC set, language, or game version. The depot value is broader in
+coverage but can be wrong if depot selection is wrong or the game downloads
+content outside Steam.
 
-For uninstalled games, provide:
+The UI should support:
 
-- **Depot** — use the Steam depot-manifest estimate.
-- **Community** — use the crowdsourced observed estimate.
-- **Compare** — display both and a range.
+- Depot mode;
+- Community mode, with a clear fallback when no value exists; and
+- Compare mode, showing both values or the range between them.
 
-Compare mode should be the transparent default while the data sources are
-being validated. Do not silently average or blend the values.
-
-If both sources exist:
+For a range, hours-per-GB runs in the opposite direction to size:
 
 ```text
-size lower bound = min(depot bytes, community representative bytes)
-size upper bound = max(depot bytes, community representative bytes)
-
-hours/GB lower bound = hours / size upper bound
-hours/GB upper bound = hours / size lower bound
+size range = min(depot, community) ... max(depot, community)
+hours/GB range = hours / max(size) ... hours / min(size)
 ```
 
-The GUI should:
+The exact default mode, sorting behavior, disagreement threshold, and visual
+design are product choices to make during implementation.
 
-- show both source labels and values;
-- visually collapse close values while preserving their provenance;
-- flag substantial disagreement, initially suggested at greater than 25%;
-- show range-valued cumulative storage in Compare mode; and
-- use an explicitly documented rule for sorting interval values, such as the
-  conservative hours/GB lower bound.
+## 7. Depot estimation
 
-If only one source is available, show that value with its source. Depot data is
-expected to exist for almost every Steam application, but errors and
-launcher-only depots must still be representable.
+Depot selection is the main technical risk. A correct estimate cannot simply
+sum every depot associated with an AppID.
 
-For installed games, the primary displayed and calculated value is the actual
-local observation. Depot and community values may still be shown as comparison
-data and used to evaluate estimator quality.
+The estimator should approximate the content Steam would install for this user,
+considering where the metadata permits:
 
-## 8. Depot and DLC selection
+- operating system and CPU architecture;
+- language and other configuration filters;
+- current public-branch manifests;
+- common and shared depots;
+- depot relationships with other apps;
+- account licenses; and
+- owned DLC that Steam normally installs with the base game.
 
-This is the technically difficult part of the project. Do not estimate a game
-by summing every depot listed under its AppID.
+It should avoid unrelated or optional content such as soundtracks, dedicated
+servers, tools, workshop content, and redistributables. Linux native-versus-
+Proton behavior and macOS architecture behavior need investigation rather than
+hard-coded assumptions.
 
-### 8.1 Required inputs
+Steam manifests distinguish compressed transfer size from uncompressed file
+size. Only the latter is relevant here. Selected depots may also contain
+overlapping destination paths, so the investigation should determine whether
+file-level merging or mount-order handling is necessary to avoid double
+counting.
 
-- Authenticated account licenses and owned depot access.
-- PICS product information for the base application and relevant DLC.
-- Current public-branch manifest IDs.
-- Target operating system.
-- Target CPU architecture.
-- Steam/content language.
-- Low-violence or regional configuration where applicable.
-- DLC ownership and whether each depot is normally mounted/installed.
+Do not download game content. The result is a **Steam-managed base installation
+estimate**, not total disk usage including launcher downloads, mods, workshop
+files, saves, shader caches, Proton prefixes, or filesystem allocation effects.
 
-### 8.2 Selection rules
+Keep enough provenance to explain which depots and DLC were included and to
+surface ambiguity rather than converting failures to zero.
 
-The implementation should approximate Steam's own depot mounting behavior:
+## 8. Existing community service
 
-- Include common depots without a conflicting configuration filter.
-- Include depots matching the target OS.
-- Include depots matching the target architecture, while correctly handling
-  depots with no architecture restriction.
-- Include the selected language and language-independent content.
-- Respect low-violence and other published configuration filters.
-- Resolve shared depots and `depotfromapp` relationships.
-- Include content depots for DLC the account owns when Steam normally installs
-  them with the base application.
-- Do not blindly include soundtracks, tools, workshop depots, dedicated
-  servers, redistributable packages, optional content, or app-managed DLC.
-- Record exclusions and ambiguity as structured warnings for debugging.
-
-Linux needs an explicit policy:
-
-- prefer a native Linux build when Steam would choose it;
-- otherwise estimate the Windows depots used through Proton;
-- do not add the shared Proton runtime itself to every game;
-- do not pretend to know the eventual per-game Proton prefix or shader-cache
-  size.
-
-macOS needs correct handling of Intel versus Apple Silicon and any Steam/Rosetta
-behavior exposed in product metadata.
-
-### 8.3 Calculate final logical installed bytes, not download bytes
-
-Steam manifests expose compressed chunk sizes and uncompressed file sizes. Only
-uncompressed file sizes are relevant.
-
-Simply summing `TotalUncompressedSize` across selected depots can overcount if
-depots mount files to the same destination path. For the accurate estimator:
-
-1. retrieve and, where necessary, decrypt the selected manifests;
-2. process them in Steam mount order;
-3. construct the final mapping of destination path to logical file size;
-4. let later mounted depots replace earlier files at the same path; and
-5. sum the final logical file sizes.
-
-Do not download content chunks.
-
-The output is a **Steam base install estimate**, not a promise about total
-filesystem allocation. It excludes launcher downloads, user content, mods,
-workshop files, caches, saves, and filesystem allocation/compression effects.
-
-## 9. Crowdsourced size service
-
-The legacy service is currently called from:
+The legacy client currently uses:
 
 `https://eu5di55p9a.execute-api.eu-west-2.amazonaws.com/default`
 
-Observed legacy client contracts:
+Observed contracts in the legacy code include:
 
-- `GET /apps` with a JSON body containing `{"ids": [...]}` in batches of 100;
-  returns records containing at least `AppId` and `Size`.
-- `GET /app/{appid}` returns a size or not-found response.
-- `POST /app/{appid}?size=<bytes>&name=<name>` adds an observation.
-- `PUT /app/{appid}?size=<bytes>&name=<name>` updates an observation.
+- `GET /apps` with `{"ids": [...]}` batches;
+- `GET /app/{appid}`;
+- `POST /app/{appid}?size=<bytes>&name=<name>`; and
+- `PUT /app/{appid}?size=<bytes>&name=<name>`.
 
-Verify the live Lambda/API implementation before depending on these details.
-Do not assume that source code for the Lambda is in the legacy repository.
+Inspect the legacy client to confirm its exact behavior and preserve
+compatibility. The Lambda, database, API shape, and aggregation behavior are
+not part of this project and should not be changed.
 
-The current database appears to expose one historical representative size per
-AppID. This remains valuable for:
+The service's limited accuracy is acceptable: it is now a secondary comparison
+and anomaly signal rather than the only estimate for uninstalled games. The UI
+should not imply that it is platform-, build-, or DLC-specific when the
+existing response does not provide that information.
 
-- launcher/bootstrapper games whose depots contain only a small installer;
-- games that download content after Steam installation;
-- catching errors in depot selection;
-- validation and anomaly detection.
+## 9. First step: feasibility spike
 
-It can also become stale after game updates and may mix platforms, languages,
-DLC configurations, and builds.
+Before building the full UI, answer the risky Steam-protocol and depot questions
+with the smallest useful prototype. The form of the prototype and its
+implementation are intentionally left to the next agent.
 
-### 9.1 Proposed future community schema
+The investigation should establish whether a distributable local application
+can:
 
-Version the API rather than breaking the legacy client. Prefer storing
-observations or aggregate distributions with:
+- authenticate safely without collecting a password;
+- retrieve owned games and lifetime playtime;
+- coexist with the normal Steam client;
+- access the metadata and manifests needed for owned paid games;
+- distinguish compressed from uncompressed sizes;
+- make explainable platform, language, and DLC depot selections; and
+- produce depot estimates that broadly agree with `SizeOnDisk` for ordinary
+  installed games while exposing outliers.
 
-- AppID;
-- bytes;
-- platform;
-- architecture;
-- Steam build ID where available;
-- observation timestamp;
-- language if it materially affects size;
-- sample count;
-- median and useful percentiles rather than only a mean.
+Use a small representative sample rather than attempting exhaustive coverage.
+Compare depot estimates with local installed sizes and, optionally, the
+unchanged community endpoint. Do not expose credentials in output or fixtures.
 
-Avoid collecting account identity. Whether contribution is automatic,
-first-run consent, or opt-in remains a product decision. The UI must clearly
-state exactly what is uploaded. Do not upload owned DLC lists without an
-explicit privacy decision; a coarse DLC-present flag or count may be enough for
-diagnostics.
+Record the findings and recommend one of:
 
-## 10. Known estimator failure modes
+- a native Rust protocol implementation;
+- a SteamKit2 or other contained sidecar;
+- the Web API key fallback with automatic SteamID discovery; or
+- a revised approach if the protocol/security cost is not justified.
 
-Design these as visible, testable cases:
+This is a decision point, not a demand to prove a predetermined architecture.
 
-- A launcher depot downloads most of the game outside Steam.
-- Depot metadata is inaccessible despite ownership.
-- A public manifest changes after cached product information.
-- Platform filters select both native and compatibility depots.
-- Language depots are omitted or double-counted.
-- Owned DLC is app-managed or optional rather than automatically installed.
-- Shared depots or overlapping destination files are double-counted.
-- A game has no meaningful playtime or zero-byte content.
-- Community data is stale or mixes incompatible configurations.
-- An external Steam library is disconnected.
-- Family sharing, free weekends, expired packages, demos, tools, and dedicated
-  servers appear in ownership metadata.
+## 10. Useful validation cases
 
-Do not hide these behind zero values. Use typed missing/error/warning states.
+As development proceeds, cover a mixture of:
 
-## 11. Suggested application architecture
+- ordinary single-platform games;
+- multi-platform and language-specific depots;
+- owned DLC;
+- shared or overlapping depots;
+- launcher/bootstrapper games;
+- external or disconnected library folders;
+- zero-playtime and missing-size cases; and
+- community values that significantly disagree with local or depot sizes.
 
-Keep domain logic independent of Tauri so it can be tested through a CLI spike
-and unit tests.
+Automated tests should focus on pure parsing, depot-selection rules, size
+arithmetic, and sanitized recorded metadata. Live account tests should remain
+explicit and local.
 
-```text
-src/                         frontend
-src-tauri/src/
-  domain/                    normalized game, size, and source types
-  local_steam/               installation and manifest discovery
-  steam_auth/                QR/session/token lifecycle
-  steam_library/             ownership, playtime, PICS
-  depot_selection/           platform/language/license rules
-  depot_manifest/            retrieval, merge, and byte calculation
-  community/                 versioned AWS client
-  commands/                  narrow Tauri IPC commands
-spikes/
-  steam-protocol/            disposable or promotable feasibility CLI
-fixtures/
-  public/                    sanitized PICS/manifest fixtures
-docs/
-  decisions/                 short architecture decision records
-```
+## 11. Prior empirical check
 
-Frontend framework selection is open. Prefer a small, conventional TypeScript
-stack with accessible table controls and minimal state machinery. The domain
-model and tests are more important than the framework.
-
-Use structured errors and tracing, with secret redaction. Cache public product
-metadata and manifests responsibly, but never cache credentials in the same
-store.
-
-## 12. Mandatory phase 0: Steam protocol feasibility spike
-
-The next Codex task should start here.
-
-Build the smallest useful Rust CLI or isolated prototype before scaffolding the
-complete Tauri UI. It should:
-
-1. perform Steam QR login;
-2. use a non-conflicting logon ID;
-3. print only the authenticated SteamID/persona needed to confirm success;
-4. retrieve owned game AppIDs, names, and lifetime playtime;
-5. retrieve licenses/owned depots and PICS metadata;
-6. choose a bounded sample of owned games;
-7. resolve current public manifests for the current OS, architecture, and a
-   selected/default language;
-8. retrieve manifests without downloading chunks;
-9. calculate both compressed bytes for diagnostics and final uncompressed
-   logical bytes, clearly using only the latter as the install estimate;
-10. identify owned DLC depots and report why each depot was included or
-    excluded;
-11. compare estimates against local `SizeOnDisk` for installed sample games;
-12. optionally compare against the legacy community endpoint;
-13. log out cleanly; and
-14. avoid persisting the refresh token in the first iteration.
-
-The spike should produce a machine-readable report with no secrets, for
-example:
-
-```json
-{
-  "app_id": 620,
-  "platform": "macos",
-  "architecture": "arm64",
-  "selected_depots": [],
-  "excluded_depots": [],
-  "included_dlc": [],
-  "compressed_bytes": 0,
-  "uncompressed_bytes": 0,
-  "installed_bytes": null,
-  "community_bytes": null,
-  "warnings": []
-}
-```
-
-### 12.1 Spike acceptance criteria
-
-Before committing to the protocol implementation, demonstrate:
-
-- QR login without handling a password.
-- Owned library and lifetime playtime retrieval.
-- No disruption to the normal Steam client session.
-- Manifest-only retrieval for owned paid games, not merely anonymous/free
-  depots.
-- Correct separation of compressed and uncompressed bytes.
-- Explainable depot selection for at least:
-  - a single-platform game;
-  - a multi-platform game;
-  - a game with language depots;
-  - a game with owned DLC, if available;
-  - a game using shared depots, if available.
-- Close agreement with local installed sizes for ordinary Steam-hosted games,
-  with discrepancies documented rather than massaged.
-- A written dependency assessment covering maintenance, licenses, protocol
-  coverage, binary impact, and fallback options.
-
-The spike may initially be developed on macOS, but it must not bake macOS paths
-or platform values into the domain logic.
-
-### 12.2 Go/no-go decision
-
-At the end, write an architecture decision record choosing one:
-
-1. native Rust Steam protocol implementation;
-2. SteamKit2 sidecar;
-3. Web API key fallback for library plus another manifest strategy; or
-4. stop and reassess because the protocol or security cost is unjustified.
-
-Do not silently proceed with a weak protocol dependency.
-
-## 13. Subsequent phases
-
-### Phase 1 — Tauri foundation and local installed library
-
-- Scaffold Tauri 2.
-- Implement cross-platform Steam installation discovery.
-- Parse library folders and installed app manifests.
-- Show installed games and exact local sizes.
-- Establish domain types, fixtures, unit tests, formatting, linting, and CI.
-
-### Phase 2 — Authenticated owned library
-
-- Integrate the selected phase-0 authentication approach.
-- Add QR UI, account state, error recovery, logout, and optional secure
-  persistence only after a security review.
-- Join owned games/playtime with installed observations.
-
-### Phase 3 — Depot estimator
-
-- Implement fully explainable depot selection.
-- Add owned DLC handling and file-level manifest merging.
-- Cache public metadata.
-- Expose calculation diagnostics in development builds.
-
-### Phase 4 — Community comparison
-
-- Integrate the existing API behind a typed provider.
-- Implement Depot, Community, and Compare modes.
-- Add discrepancy flags and range-valued hours/GB and cumulative storage.
-- Propose and, if approved, implement a versioned community observation API.
-
-### Phase 5 — Product UX and distribution
-
-- Sorting, filtering, storage-budget exploration, and source explanations.
-- Accessible keyboard and screen-reader behavior.
-- Windows, macOS, and Linux packaging.
-- Signing/notarization decisions.
-- Update mechanism and release CI.
-- Privacy documentation.
-
-## 14. Testing strategy
-
-- Unit-test VDF/ACF parsing with sanitized fixtures.
-- Unit-test depot filters as pure functions.
-- Unit-test manifest path merging and overrides.
-- Unit-test bytes and hours/GB interval arithmetic.
-- Snapshot sanitized diagnostic reports, never tokens.
-- Keep live Steam tests opt-in and excluded from normal CI.
-- Create contract tests for the community API with recorded sanitized
-  responses.
-- Run platform discovery tests on each target OS in CI where possible.
-- Manually test external/disconnected library folders.
-- Maintain a small documented validation corpus containing ordinary games and
-  known launcher/bootstrapper outliers.
-
-## 15. Open product decisions
-
-Do not block the phase-0 spike on these:
-
-- Final product/repository display name.
-- Frontend framework.
-- Whether persistent Steam login is offered in the first release.
-- Default Steam content language and whether it follows the client or a user
-  setting.
-- Exact Linux native-versus-Proton presentation.
-- Community contribution consent/default.
-- Community aggregation and outlier policy.
-- Whether Compare or Depot mode becomes the long-term default after validation.
-- License for the new repository.
-
-## 16. Research notes and empirical sanity check
-
-Steam depot manifests expose both compressed and uncompressed sizes. A small
-comparison performed on 2026-07-27 produced:
+A small comparison performed on 2026-07-27 found:
 
 | Game | Legacy community | Depot uncompressed | Depot compressed | Store requirement |
 | --- | ---: | ---: | ---: | ---: |
@@ -602,29 +260,19 @@ comparison performed on 2026-07-27 produced:
 | PAYDAY 2 | 86.21 GiB | 84.18 GiB | 34.51 GiB | 83 GB |
 | Baldur's Gate 3 | 147.22 GiB | 144.67 GiB | 118.85 GiB | 150 GB |
 
-This is not a sufficient validation set, but it supports three decisions:
-
-- uncompressed manifest bytes, not compressed transfer bytes, are the useful
-  depot estimate;
-- community observations can become stale; and
-- store requirements are too unreliable to include.
+This is not a sufficient validation set, but it supports using uncompressed
+manifest bytes, retaining community observations as a second signal, and
+excluding store requirements.
 
 No suitable documented third-party install-size API was found. SteamDB exposes
-excellent human-facing depot information but explicitly provides no API and
-prohibits scraping:
-<https://steamdb.info/faq/>.
+useful human-facing depot information but provides no API and prohibits
+scraping: <https://steamdb.info/faq/>.
 
-## 17. Instructions to the next Codex task
+## 12. Guidance for the next Codex task
 
-1. Read this entire specification before changing files.
-2. Inspect the legacy implementation for behavior, but do not modify the legacy
-   repository.
-3. Check for repository-local `AGENTS.md` or other instructions.
-4. Start with section 12, not a polished frontend.
-5. Write a short plan and keep the user informed during live Steam testing.
-6. Never print or persist Steam credentials or tokens.
-7. Prefer evidence from a working spike over assumptions about protocol
-   libraries.
-8. Record important deviations or decisions under `docs/decisions/`.
-9. Stop for user direction if completing a step would require a materially
-   broader account permission or privacy policy than specified here.
+Read this brief and inspect the legacy implementation for behavioral context,
+without modifying the legacy repository. Begin with the feasibility work in
+section 9, share findings with the user, and let evidence shape the
+architecture. Preserve the product decisions and safety constraints above, but
+otherwise treat implementation structure, libraries, frontend framework,
+milestones, and detailed UX as open design work.

@@ -8,7 +8,7 @@ This repository is the successor to
 The original Python repository is intentionally preserved as a separate,
 working legacy project.
 
-Development should begin with the Steam protocol feasibility spike described
-in [`docs/v2-spec.md`](docs/v2-spec.md). Do not scaffold the full product until
-that spike has established whether QR authentication, library retrieval, and
-depot manifest sizing are sufficiently reliable.
+The [project brief](docs/v2-spec.md) captures the product decisions, research
+so far, and the main feasibility questions. A small Steam protocol and depot
+sizing investigation is the recommended starting point; its findings should
+shape the implementation.
