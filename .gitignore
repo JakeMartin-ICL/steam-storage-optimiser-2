@@ -1,0 +1,33 @@
+# JavaScript / TypeScript
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Rust / Tauri
+target/
+src-tauri/target/
+gen/
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Logs and test output
+*.log
+coverage/
+test-results/
+playwright-report/
+
+# Local spike output
+spikes/output/
+fixtures/private/
