@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,20 +29,115 @@ pub struct StorageTargetDefault {
     pub filesystem_size_bytes: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SteamLocation {
+    pub path: Option<String>,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SavedSteamLocation {
+    path: PathBuf,
+}
+
 const GIB: u64 = 1024 * 1024 * 1024;
 const TARGET_STEP_BYTES: u64 = 10 * GIB;
 const MINIMUM_TARGET_BYTES: u64 = 100 * GIB;
 
 #[tauri::command]
 pub fn get_storage_target_default() -> Result<StorageTargetDefault, String> {
-    let steam_root = default_steam_root()
-        .ok_or_else(|| "Could not locate the Steam installation".to_string())?;
+    let steam_root =
+        steam_root().ok_or_else(|| "Could not locate the Steam installation".to_string())?;
     let filesystem_size_bytes = fs4::total_space(&steam_root)
         .map_err(|error| format!("Could not read Steam filesystem capacity: {error}"))?;
     Ok(StorageTargetDefault {
         target_bytes: recommended_storage_target(filesystem_size_bytes),
         filesystem_size_bytes,
     })
+}
+
+#[tauri::command]
+pub fn get_steam_location() -> SteamLocation {
+    if let Some(path) = saved_steam_root() {
+        return steam_location(path, "saved");
+    }
+    if let Some(path) = detected_steam_root() {
+        return steam_location(path, "automatic");
+    }
+    SteamLocation {
+        path: None,
+        source: None,
+    }
+}
+
+#[tauri::command]
+pub fn set_steam_location(path: String) -> Result<SteamLocation, String> {
+    let path = validate_selected_steam_root(Path::new(&path))?;
+    save_steam_root(&path)?;
+    Ok(steam_location(path, "saved"))
+}
+
+fn steam_location(path: PathBuf, source: &str) -> SteamLocation {
+    SteamLocation {
+        path: Some(path.to_string_lossy().into_owned()),
+        source: Some(source.to_string()),
+    }
+}
+
+fn steam_root() -> Option<PathBuf> {
+    saved_steam_root().or_else(detected_steam_root)
+}
+
+fn validate_selected_steam_root(selected: &Path) -> Result<PathBuf, String> {
+    let candidate = if selected
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("steamapps"))
+    {
+        selected.parent().unwrap_or(selected)
+    } else {
+        selected
+    };
+    if !is_steam_root(candidate) {
+        return Err(
+            "That folder does not contain Steam's steamapps directory. Select the main Steam folder."
+                .to_string(),
+        );
+    }
+    candidate
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the selected Steam folder: {error}"))
+}
+
+fn saved_steam_root() -> Option<PathBuf> {
+    let encoded = fs::read(steam_location_path().ok()?).ok()?;
+    let saved: SavedSteamLocation = serde_json::from_slice(&encoded).ok()?;
+    is_steam_root(&saved.path).then_some(saved.path)
+}
+
+fn save_steam_root(path: &Path) -> Result<(), String> {
+    let preference_path = steam_location_path()?;
+    let parent = preference_path
+        .parent()
+        .ok_or_else(|| "Steam location path has no parent directory".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create the settings directory: {error}"))?;
+    let encoded = serde_json::to_vec(&SavedSteamLocation {
+        path: path.to_path_buf(),
+    })
+    .map_err(|error| format!("Could not encode the Steam location: {error}"))?;
+    fs::write(preference_path, encoded)
+        .map_err(|error| format!("Could not save the Steam location: {error}"))
+}
+
+fn steam_location_path() -> Result<PathBuf, String> {
+    dirs_next::data_local_dir()
+        .map(|directory| {
+            directory
+                .join("steam-storage-optimiser")
+                .join("steam-location.json")
+        })
+        .ok_or_else(|| "Could not locate the local application-data directory".to_string())
 }
 
 fn recommended_storage_target(filesystem_size_bytes: u64) -> u64 {
@@ -55,14 +150,14 @@ fn recommended_storage_target(filesystem_size_bytes: u64) -> u64 {
 }
 
 pub fn discover_installed_apps() -> Result<Vec<InstalledApp>, String> {
-    let steam_root = default_steam_root()
-        .ok_or_else(|| "Could not locate the Steam installation".to_string())?;
+    let steam_root =
+        steam_root().ok_or_else(|| "Could not locate the Steam installation".to_string())?;
     discover_installed_apps_at(&steam_root)
 }
 
 pub fn discover_local_playtimes(account_id: u32) -> Result<BTreeMap<u32, u32>, String> {
-    let steam_root = default_steam_root()
-        .ok_or_else(|| "Could not locate the Steam installation".to_string())?;
+    let steam_root =
+        steam_root().ok_or_else(|| "Could not locate the Steam installation".to_string())?;
     let path = steam_root
         .join("userdata")
         .join(account_id.to_string())
@@ -202,29 +297,69 @@ fn integer_value(value: Option<&KeyValue>) -> Option<u64> {
     })
 }
 
+fn is_steam_root(path: &Path) -> bool {
+    path.join("steamapps").is_dir()
+}
+
+fn detected_steam_root() -> Option<PathBuf> {
+    automatic_steam_candidates()
+        .into_iter()
+        .find(|path| is_steam_root(path))
+}
+
 #[cfg(target_os = "macos")]
-fn default_steam_root() -> Option<PathBuf> {
-    dirs_next::home_dir().map(|home| home.join("Library/Application Support/Steam"))
+fn automatic_steam_candidates() -> Vec<PathBuf> {
+    dirs_next::home_dir()
+        .map(|home| vec![home.join("Library/Application Support/Steam")])
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "windows")]
-fn default_steam_root() -> Option<PathBuf> {
-    std::env::var_os("PROGRAMFILES(X86)")
-        .or_else(|| std::env::var_os("PROGRAMFILES"))
-        .map(PathBuf::from)
-        .map(|path| path.join("Steam"))
+fn automatic_steam_candidates() -> Vec<PathBuf> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    let mut candidates = Vec::new();
+    if let Ok(steam) = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Software\\Valve\\Steam") {
+        if let Ok(path) = steam.get_value::<String, _>("SteamPath") {
+            candidates.push(PathBuf::from(path));
+        }
+        if let Ok(executable) = steam.get_value::<String, _>("SteamExe")
+            && let Some(parent) = Path::new(&executable).parent()
+        {
+            candidates.push(parent.to_path_buf());
+        }
+    }
+    for variable in ["PROGRAMFILES(X86)", "PROGRAMFILES"] {
+        if let Some(path) = std::env::var_os(variable) {
+            candidates.push(PathBuf::from(path).join("Steam"));
+        }
+    }
+    candidates
 }
 
 #[cfg(target_os = "linux")]
-fn default_steam_root() -> Option<PathBuf> {
-    let home = dirs_next::home_dir()?;
-    [
-        home.join(".local/share/Steam"),
-        home.join(".steam/steam"),
-        home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
-    ]
-    .into_iter()
-    .find(|path| path.exists())
+fn automatic_steam_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("STEAM_DIR") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os("XDG_DATA_HOME") {
+        let path = PathBuf::from(path);
+        candidates.push(path.join("Steam"));
+        candidates.push(path.join("steam"));
+    }
+    if let Some(home) = dirs_next::home_dir() {
+        candidates.extend([
+            home.join(".local/share/Steam"),
+            home.join(".local/share/steam"),
+            home.join(".steam/root"),
+            home.join(".steam/steam"),
+            home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+            home.join("snap/steam/common/.local/share/Steam"),
+        ]);
+    }
+    candidates
 }
 
 #[cfg(test)]
@@ -293,5 +428,27 @@ mod tests {
             parse_local_playtimes(fixture).expect("playtimes should parse"),
             BTreeMap::from([(42, 321)])
         );
+    }
+
+    #[test]
+    fn accepts_a_steam_root_or_its_steamapps_directory() {
+        let directory = tempfile::tempdir().expect("temp directory should exist");
+        let steamapps = directory.path().join("steamapps");
+        fs::create_dir(&steamapps).expect("fixture steamapps should exist");
+
+        assert_eq!(
+            validate_selected_steam_root(directory.path()).expect("root should be accepted"),
+            directory.path().canonicalize().unwrap()
+        );
+        assert_eq!(
+            validate_selected_steam_root(&steamapps).expect("steamapps should be accepted"),
+            directory.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_a_folder_that_is_not_a_steam_installation() {
+        let directory = tempfile::tempdir().expect("temp directory should exist");
+        assert!(validate_selected_steam_root(directory.path()).is_err());
     }
 }

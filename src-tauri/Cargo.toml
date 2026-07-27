@@ -30,6 +30,10 @@ serde_json = "1"
 steamroom = { version = "0.3.0", features = ["serde"] }
 steamroom-client = { version = "0.3.0", features = ["serde"] }
 tokio = { version = "1", features = ["sync", "time"] }
+tauri-plugin-dialog = "^2"
 
 [dev-dependencies]
 tempfile = "3"
+
+[target."cfg(windows)".dependencies]
+winreg = "0.55"

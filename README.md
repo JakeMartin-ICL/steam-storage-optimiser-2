@@ -14,6 +14,8 @@ The app is the Rust/Tauri successor to the original
 - Browse owned and Steam Family games with playtime, artwork, platform
   compatibility, and shared-library status.
 - Read exact `SizeOnDisk` values for locally installed games.
+- Find standard Steam installations and libraries on additional drives, with a
+  manual folder picker for nonstandard locations.
 - Estimate uninstalled games directly from Steam depot manifests.
 - Compare Steam depot estimates with the existing crowdsourced size database.
 - Filter, search, and sort by storage, playtime, or hours played per gigabyte.
@@ -41,6 +43,18 @@ The cumulative column compares the visible library with a configurable storage
 target. Its initial suggestion is half the capacity of the filesystem
 containing the primary Steam installation; if that cannot be detected, it
 defaults to 1 TiB.
+
+## Steam installation discovery
+
+The app checks the standard Steam data location on macOS, Steam's per-user
+registry entry and conventional Program Files locations on Windows, and common
+native, Flatpak, Snap, and XDG locations on Linux. Once the main Steam folder is
+found, every library listed in Steam's `libraryfolders.vdf` is scanned, including
+libraries on other drives.
+
+If automatic discovery misses a custom installation, use **Locate Steam** and
+select either the main Steam folder or its `steamapps` directory. The selection
+is saved for future launches and can be changed from the account panel.
 
 ## Privacy and local data
 

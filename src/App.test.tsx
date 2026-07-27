@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,7 +24,12 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
+}));
+
 const mockedInvoke = vi.mocked(invoke);
+const mockedOpen = vi.mocked(open);
 const gib = 1024 ** 3;
 const games: LibraryGame[] = [
   {
@@ -77,10 +83,42 @@ const completeView: AuthView = {
 describe("product UI", () => {
   beforeEach(() => {
     mockedInvoke.mockReset();
+    mockedOpen.mockReset();
     mockedInvoke.mockImplementation(async (command) => {
       if (command === "get_auth_state") return initialAuthView;
       if (command === "has_saved_login") return false;
       return undefined;
+    });
+  });
+
+  it("offers a persisted manual Steam location when discovery fails", async () => {
+    const user = userEvent.setup();
+    mockedOpen.mockResolvedValue("/custom/Steam");
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === "get_auth_state") return initialAuthView;
+      if (command === "has_saved_login") return false;
+      if (command === "get_steam_location") {
+        return { path: null, source: null };
+      }
+      if (command === "set_steam_location") {
+        return { path: "/custom/Steam", source: "saved" };
+      }
+      return undefined;
+    });
+    render(<App />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Locate Steam" }),
+    );
+
+    expect(mockedOpen).toHaveBeenCalledWith(
+      expect.objectContaining({
+        directory: true,
+        multiple: false,
+      }),
+    );
+    expect(mockedInvoke).toHaveBeenCalledWith("set_steam_location", {
+      path: "/custom/Steam",
     });
   });
 

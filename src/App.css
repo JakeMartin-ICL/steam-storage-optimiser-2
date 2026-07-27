@@ -313,6 +313,30 @@ button {
   outline-offset: 2px;
 }
 
+.steam-location-warning {
+  display: grid;
+  gap: 7px;
+  margin-top: 17px;
+  color: #8ba0ae;
+  font-size: 9px;
+}
+
+.steam-location-warning button {
+  padding: 7px 11px;
+  color: #a9d8f1;
+  border: 1px solid rgba(102, 192, 244, 0.22);
+  border-radius: 6px;
+  background: rgba(69, 139, 176, 0.08);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.steam-location-warning button:hover {
+  color: #d9f1ff;
+  border-color: rgba(102, 192, 244, 0.38);
+}
+
 .tooltip-button {
   width: 16px;
   height: 16px;
@@ -569,7 +593,8 @@ button {
   white-space: nowrap;
 }
 
-.disconnect-button {
+.disconnect-button,
+.steam-folder-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -584,10 +609,16 @@ button {
   font-size: 8px;
 }
 
-.disconnect-button:hover {
+.disconnect-button:hover,
+.steam-folder-button:hover {
   color: #c4d7e2;
   border-color: var(--line-strong);
   background: rgba(69, 139, 176, 0.08);
+}
+
+.steam-folder-button {
+  color: #678091;
+  background: transparent;
 }
 
 .main-pane {
@@ -1811,7 +1842,8 @@ button {
   }
 
   .account-copy,
-  .disconnect-button > span:last-child {
+  .disconnect-button > span:last-child,
+  .steam-folder-button > span:last-child {
     display: none;
   }
 
@@ -1824,7 +1856,8 @@ button {
     place-items: center;
   }
 
-  .disconnect-button {
+  .disconnect-button,
+  .steam-folder-button {
     width: 30px;
     height: 30px;
     justify-content: center;

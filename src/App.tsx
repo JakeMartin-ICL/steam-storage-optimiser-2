@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { type CSSProperties, useEffect, useMemo, useState } from "react";
 import "./App.css";
 
@@ -66,6 +67,11 @@ export type SteamProfile = {
 export type StorageTargetDefault = {
   targetBytes: number;
   filesystemSizeBytes: number;
+};
+
+export type SteamLocation = {
+  path: string | null;
+  source: "saved" | "automatic" | null;
 };
 
 export type DepotProgress = {
@@ -389,6 +395,9 @@ export function getCumulativeBarWidths(
 function App() {
   const [auth, setAuth] = useState<AuthView>(initialAuthView);
   const [commandError, setCommandError] = useState<string | null>(null);
+  const [steamLocation, setSteamLocation] = useState<
+    SteamLocation | undefined
+  >();
   const [contributeCommunitySizes, setContributeCommunitySizes] = useState(
     () => {
       try {
@@ -436,6 +445,34 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    void invoke<SteamLocation>("get_steam_location")
+      .then(setSteamLocation)
+      .catch(() => setSteamLocation({ path: null, source: null }));
+  }, []);
+
+  const selectSteamLocation = async () => {
+    setCommandError(null);
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Locate your Steam folder",
+        defaultPath: steamLocation?.path ?? undefined,
+      });
+      if (typeof selected !== "string") return;
+      const location = await invoke<SteamLocation>("set_steam_location", {
+        path: selected,
+      });
+      setSteamLocation(location);
+      if (auth.phase === "complete") {
+        window.location.reload();
+      }
+    } catch (error) {
+      setCommandError(String(error));
+    }
+  };
+
   const startLogin = async () => {
     setCommandError(null);
     setAuth({
@@ -466,7 +503,15 @@ function App() {
   };
 
   if (auth.phase === "complete") {
-    return <LibraryApp auth={auth} onSignOut={forgetSavedLogin} />;
+    return (
+      <LibraryApp
+        auth={auth}
+        locationError={commandError}
+        steamLocation={steamLocation}
+        onLocateSteam={selectSteamLocation}
+        onSignOut={forgetSavedLogin}
+      />
+    );
   }
 
   return (
@@ -476,7 +521,9 @@ function App() {
       contributeCommunitySizes={contributeCommunitySizes}
       onStart={startLogin}
       onCancel={cancelLogin}
+      onLocateSteam={selectSteamLocation}
       onContributionChange={setContributeCommunitySizes}
+      steamLocation={steamLocation}
     />
   );
 }
@@ -487,14 +534,18 @@ function Onboarding({
   contributeCommunitySizes,
   onStart,
   onCancel,
+  onLocateSteam,
   onContributionChange,
+  steamLocation,
 }: {
   auth: AuthView;
   commandError: string | null;
   contributeCommunitySizes: boolean;
   onStart: () => Promise<void>;
   onCancel: () => Promise<void>;
+  onLocateSteam: () => Promise<void>;
   onContributionChange: (enabled: boolean) => void;
+  steamLocation: SteamLocation | undefined;
 }) {
   const busy = !["idle", "error"].includes(auth.phase);
   return (
@@ -558,6 +609,14 @@ function Onboarding({
                   ?
                 </button>
               </div>
+              {steamLocation && !steamLocation.path && (
+                <div className="steam-location-warning">
+                  <span>Steam wasn&apos;t found on this computer.</span>
+                  <button type="button" onClick={onLocateSteam}>
+                    Locate Steam
+                  </button>
+                </div>
+              )}
             </>
           )}
           {busy && (
@@ -594,9 +653,15 @@ function LoadingSteps({ phase }: { phase: string }) {
 
 function LibraryApp({
   auth,
+  locationError,
+  steamLocation,
+  onLocateSteam,
   onSignOut,
 }: {
   auth: AuthView;
+  locationError: string | null;
+  steamLocation: SteamLocation | undefined;
+  onLocateSteam: () => Promise<void>;
   onSignOut: () => Promise<void>;
 }) {
   const [query, setQuery] = useState("");
@@ -750,6 +815,15 @@ function LibraryApp({
             <span aria-hidden="true">↪</span>
             <span>Disconnect</span>
           </button>
+          <button
+            className="steam-folder-button"
+            title={steamLocation?.path ?? "Steam folder not found"}
+            type="button"
+            onClick={onLocateSteam}
+          >
+            <span aria-hidden="true">⌑</span>
+            <span>{steamLocation?.path ? "Change Steam folder" : "Locate Steam"}</span>
+          </button>
         </div>
       </aside>
 
@@ -804,6 +878,12 @@ function LibraryApp({
             <span>!</span>
             Community estimates are temporarily unavailable. Depot and local
             sizes are unaffected.
+          </div>
+        )}
+        {locationError && (
+          <div className="notice-banner">
+            <span>!</span>
+            {locationError}
           </div>
         )}
         {auth.depotError && (
