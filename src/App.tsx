@@ -1016,6 +1016,13 @@ function LibraryApp({
   const includedLibraryGames = auth.games.filter(
     (game) => showNonGames || isGameApplication(game),
   );
+  const resultNoun = showNonGames ? "items" : "games";
+  const visibleResultLabel =
+    visibleGames.length === includedLibraryGames.length
+      ? `${visibleGames.length.toLocaleString()} ${resultNoun}`
+      : `${visibleGames.length.toLocaleString()} of ${includedLibraryGames.length.toLocaleString()} ${resultNoun}`;
+  const completionTargetFill =
+    completionMode === "main" ? 0 : completionMode === "completionist" ? 100 : 50;
   const installedGames = includedLibraryGames.filter((game) => game.installed);
   const sharedGames = includedLibraryGames.filter((game) => game.sharedOnly);
   const diskUsed = installedGames.reduce(
@@ -1057,10 +1064,96 @@ function LibraryApp({
         <Brand />
         <nav aria-label="Main navigation">
           <button className="nav-item active">
-            <span aria-hidden="true">▦</span> Library
-            <small>{includedLibraryGames.length}</small>
+            <span aria-hidden="true">▦</span>
+            <span className="nav-copy">
+              <strong>Library</strong>
+              <small>{visibleResultLabel}</small>
+            </span>
           </button>
         </nav>
+        <section className="sidebar-controls" aria-label="Library targets">
+          <div className="storage-target-control">
+            <div>
+              <label htmlFor="storage-target">
+                Library size target
+                <strong>{formatStorageTarget(storageTarget.bytes)}</strong>
+              </label>
+              <small>
+                {storageTarget.customized
+                  ? "Saved on this device"
+                  : steamFilesystemSize
+                    ? `Suggested from your ${formatBytes(steamFilesystemSize)} Steam drive`
+                    : "Using the 1 TiB fallback"}
+              </small>
+            </div>
+            <input
+              aria-label="Library size target"
+              id="storage-target"
+              type="range"
+              min={storageTargetMinimum}
+              max={storageTargetMaximum}
+              step={10 * gib}
+              value={storageTarget.bytes}
+              style={
+                {
+                  "--target-fill": `${Math.min(Math.max(storageTargetFill, 0), 100)}%`,
+                } as CSSProperties
+              }
+              onChange={(event) =>
+                updateStorageTarget(Number(event.target.value))
+              }
+            />
+            <span className="target-scale">
+              <small>10 GiB</small>
+              <small>{formatStorageTarget(storageTargetMaximum)}</small>
+            </span>
+          </div>
+          <div className="completion-control">
+            <div>
+              <span>Remaining-time target</span>
+              <strong>
+                {completionMode === "main"
+                  ? "Main Story"
+                  : completionMode === "completionist"
+                    ? "Completionist"
+                    : "Main + Extras"}
+              </strong>
+            </div>
+            <input
+              aria-label="HowLongToBeat completion level"
+              type="range"
+              min="0"
+              max="2"
+              step="1"
+              value={
+                completionMode === "main"
+                  ? 0
+                  : completionMode === "main_extra"
+                    ? 1
+                    : 2
+              }
+              style={
+                {
+                  "--completion-fill": `${completionTargetFill}%`,
+                } as CSSProperties
+              }
+              onChange={(event) =>
+                setCompletionMode(
+                  event.target.value === "0"
+                    ? "main"
+                    : event.target.value === "2"
+                      ? "completionist"
+                      : "main_extra",
+                )
+              }
+            />
+            <span className="completion-labels" aria-hidden="true">
+              <small>Main Story</small>
+              <small>Main + Extras</small>
+              <small>Completionist</small>
+            </span>
+          </div>
+        </section>
         <div className="account-panel">
           <div className="account-identity">
             <span className="avatar">
@@ -1223,82 +1316,6 @@ function LibraryApp({
           )}
 
         <section className="library-panel">
-          <div className="storage-target-control">
-            <div>
-              <label htmlFor="storage-target">
-                Library size target
-                <strong>{formatStorageTarget(storageTarget.bytes)}</strong>
-              </label>
-              <small>
-                {storageTarget.customized
-                  ? "Saved on this device"
-                  : steamFilesystemSize
-                    ? `Suggested from your ${formatBytes(steamFilesystemSize)} primary Steam drive`
-                    : "Using the 1 TiB fallback"}
-              </small>
-            </div>
-            <input
-              aria-label="Library size target"
-              id="storage-target"
-              type="range"
-              min={storageTargetMinimum}
-              max={storageTargetMaximum}
-              step={10 * gib}
-              value={storageTarget.bytes}
-              style={
-                {
-                  "--target-fill": `${Math.min(Math.max(storageTargetFill, 0), 100)}%`,
-                } as CSSProperties
-              }
-              onChange={(event) =>
-                updateStorageTarget(Number(event.target.value))
-              }
-            />
-            <span className="target-scale">
-              <small>10 GiB</small>
-              <small>{formatStorageTarget(storageTargetMaximum)}</small>
-            </span>
-          </div>
-          <div className="completion-control">
-            <div>
-              <span>Remaining-time target</span>
-              <strong>
-                {completionMode === "main"
-                  ? "Main Story"
-                  : completionMode === "completionist"
-                    ? "Completionist"
-                    : "Main + Extras"}
-              </strong>
-            </div>
-            <input
-              aria-label="HowLongToBeat completion level"
-              type="range"
-              min="0"
-              max="2"
-              step="1"
-              value={
-                completionMode === "main"
-                  ? 0
-                  : completionMode === "main_extra"
-                    ? 1
-                    : 2
-              }
-              onChange={(event) =>
-                setCompletionMode(
-                  event.target.value === "0"
-                    ? "main"
-                    : event.target.value === "2"
-                      ? "completionist"
-                      : "main_extra",
-                )
-              }
-            />
-            <span className="completion-labels" aria-hidden="true">
-              <small>Main Story</small>
-              <small>Main + Extras</small>
-              <small>Completionist</small>
-            </span>
-          </div>
           <div className="library-toolbar">
             <div className="scope-tabs" aria-label="Library scope">
               {(["all", "installed", "uninstalled"] as LibraryScope[]).map(
@@ -1360,17 +1377,6 @@ function LibraryApp({
             </div>
           </div>
 
-          <div className="table-caption">
-            <span>
-              Showing <strong>{visibleGames.length}</strong>{" "}
-              {showNonGames ? "items" : "games"}
-            </span>
-            <p>
-              Installed games always use Steam&apos;s exact local size.
-              Uninstalled games use your selected estimate source.
-            </p>
-          </div>
-
           <div className="game-table" role="table" aria-label="Steam library">
             <div className="game-row table-head" role="row">
               <SortableHeader
@@ -1395,6 +1401,7 @@ function LibraryApp({
                 active={sort === "size"}
                 direction={sortDirection}
                 label="Storage"
+                infoTooltip="Installed games use Steam's exact local size. Uninstalled games use the selected estimate source."
                 onClick={() => updateSort("size")}
               />
               <span role="columnheader">Cumulative</span>
@@ -1519,11 +1526,13 @@ function SummaryCard({
 function SortableHeader({
   active,
   direction,
+  infoTooltip,
   label,
   onClick,
 }: {
   active: boolean;
   direction: SortDirection;
+  infoTooltip?: string;
   label: string;
   onClick: () => void;
 }) {
@@ -1539,6 +1548,16 @@ function SortableHeader({
       <span aria-hidden="true">
         {active ? (direction === "ascending" ? "↑" : "↓") : "↕"}
       </span>
+      {infoTooltip && (
+        <span
+          className="header-info"
+          data-tooltip={infoTooltip}
+          title={infoTooltip}
+          aria-hidden="true"
+        >
+          i
+        </span>
+      )}
     </button>
   );
 }

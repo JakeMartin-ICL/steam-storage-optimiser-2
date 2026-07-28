@@ -15,6 +15,7 @@
         "title": "Steam Storage Optimiser",
         "width": 1120,
         "height": 760,
+        "maximized": true,
         "minWidth": 860,
         "minHeight": 620,
         "resizable": true,

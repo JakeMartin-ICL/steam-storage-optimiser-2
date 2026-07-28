@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App, {
@@ -285,6 +285,7 @@ describe("product UI", () => {
     await waitFor(() =>
       expect(screen.queryByText("Shared Quest")).not.toBeInTheDocument(),
     );
+    expect(screen.getByText("1 of 2 games").closest("nav")).not.toBeNull();
   });
 
   it("can manually correct a HowLongToBeat match", async () => {
@@ -425,6 +426,40 @@ describe("product UI", () => {
     expect(storageHeader).toHaveAttribute("aria-sort", "descending");
     await user.click(storageHeader);
     expect(storageHeader).toHaveAttribute("aria-sort", "ascending");
+  });
+
+  it("keeps compact library controls in the sidebar", async () => {
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === "get_auth_state") return completeView;
+      return undefined;
+    });
+    render(<App />);
+
+    await screen.findByText("Installed Hero");
+    const sizeTarget = screen.getByRole("slider", {
+      name: "Library size target",
+    });
+    const completionTarget = screen.getByRole("slider", {
+      name: "HowLongToBeat completion level",
+    });
+    expect(sizeTarget.closest("aside")).not.toBeNull();
+    expect(completionTarget.closest("aside")).not.toBeNull();
+    expect(completionTarget).toHaveStyle("--completion-fill: 50%");
+
+    fireEvent.change(completionTarget, { target: { value: "0" } });
+    expect(completionTarget).toHaveStyle("--completion-fill: 0%");
+
+    expect(screen.getByText("2 games").closest("nav")).not.toBeNull();
+    expect(
+      screen.queryByText(/Installed games always use Steam/),
+    ).not.toBeInTheDocument();
+    const storageHeader = screen.getByRole("columnheader", {
+      name: "Storage",
+    });
+    expect(storageHeader.querySelector(".header-info")).toHaveAttribute(
+      "data-tooltip",
+      expect.stringContaining("exact local size"),
+    );
   });
 
   it("shows non-blocking library-wide depot progress", async () => {
