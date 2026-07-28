@@ -8,9 +8,13 @@ import App, {
   filterAndSortGames,
   formatByteRange,
   formatBytes,
+  getAdaptiveBarWidths,
   getCumulativeBarWidths,
   getEfficiencyBarWidths,
   getGameMetrics,
+  getHltbTarget,
+  getRemainingMetrics,
+  getRemainingTime,
   getStorageScaleMaximum,
   getStorageBarWidths,
   gameArtworkUrl,
@@ -35,6 +39,7 @@ const games: LibraryGame[] = [
   {
     appId: 1,
     name: "Installed Hero",
+    appType: "game",
     playtimeMinutes: 600,
     sharedOnly: false,
     installed: true,
@@ -48,10 +53,21 @@ const games: LibraryGame[] = [
     depotWarnings: [],
     depotError: null,
     communitySizeBytes: 4 * gib,
+    hltb: {
+      gameId: 101,
+      gameName: "Installed Hero",
+      mainSeconds: 15 * 3600,
+      mainExtraSeconds: 30 * 3600,
+      completionistSeconds: 50 * 3600,
+      steamAppId: 1,
+      matchMethod: "steam_app_id",
+    },
+    hltbStatus: "matched",
   },
   {
     appId: 2,
     name: "Shared Quest",
+    appType: "game",
     playtimeMinutes: null,
     sharedOnly: true,
     installed: false,
@@ -65,6 +81,8 @@ const games: LibraryGame[] = [
     depotWarnings: ["Family owner selected"],
     depotError: null,
     communitySizeBytes: 8 * gib,
+    hltb: null,
+    hltbStatus: "pending",
   },
 ];
 const completeView: AuthView = {
@@ -183,6 +201,8 @@ describe("product UI", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Installed Hero")).toBeInTheDocument();
     expect(screen.getByText("Shared Quest")).toBeInTheDocument();
+    expect(screen.getByText("pending")).toBeInTheDocument();
+    expect(screen.queryByText("no match")).not.toBeInTheDocument();
     expect(screen.getByText("App 1")).toBeInTheDocument();
     expect(screen.getByText("App 2")).toBeInTheDocument();
     expect(screen.getByText("Jake")).toBeInTheDocument();
@@ -267,6 +287,72 @@ describe("product UI", () => {
     );
   });
 
+  it("can manually correct a HowLongToBeat match", async () => {
+    const user = userEvent.setup();
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === "get_auth_state") return completeView;
+      if (command === "search_hltb") {
+        return [
+          {
+            gameId: 202,
+            gameName: "Installed Hero: Definitive Edition",
+            mainSeconds: 20 * 3600,
+            mainExtraSeconds: 35 * 3600,
+            completionistSeconds: 60 * 3600,
+            steamAppId: null,
+            platforms: "PC",
+            similarity: 0.9,
+          },
+        ];
+      }
+      return undefined;
+    });
+    render(<App />);
+
+    await user.click(await screen.findByText("Installed Hero"));
+    await user.click(screen.getByRole("button", { name: "Change match" }));
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Installed Hero: Definitive Edition/,
+      }),
+    );
+
+    expect(mockedInvoke).toHaveBeenCalledWith("set_hltb_match", {
+      appId: 1,
+      candidate: expect.objectContaining({ gameId: 202 }),
+    });
+  });
+
+  it("distinguishes a match with no HLTB completion data", async () => {
+    const noTimesGame: LibraryGame = {
+      ...games[0],
+      hltb: {
+        ...games[0].hltb!,
+        gameName: "#SelfieTennis",
+        mainSeconds: null,
+        mainExtraSeconds: null,
+        completionistSeconds: null,
+      },
+      hltbStatus: "matched",
+    };
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === "get_auth_state") {
+        return { ...completeView, games: [noTimesGame], libraryCount: 1 };
+      }
+      return undefined;
+    });
+    render(<App />);
+
+    expect(await screen.findByText("no completion data")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(
+        "#SelfieTennis was matched on HowLongToBeat, but it has no completion-time data.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("no match")).not.toBeInTheDocument();
+  });
+
   it("can hide games incompatible with the current OS", async () => {
     const user = userEvent.setup();
     mockedInvoke.mockImplementation(async (command) => {
@@ -283,6 +369,62 @@ describe("product UI", () => {
     await waitFor(() =>
       expect(screen.queryByText("Shared Quest")).not.toBeInTheDocument(),
     );
+  });
+
+  it("hides Steam software by default and can include it", async () => {
+    const user = userEvent.setup();
+    const software = {
+      ...games[1],
+      appId: 3,
+      name: "Benchmark Tool",
+      appType: "application",
+      sharedOnly: false,
+      currentOsSupported: true,
+      hltbStatus: "not_applicable" as const,
+    };
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === "get_auth_state") {
+        return { ...completeView, games: [...games, software], libraryCount: 3 };
+      }
+      return undefined;
+    });
+    render(<App />);
+
+    await screen.findByText("Installed Hero");
+    expect(screen.queryByText("Benchmark Tool")).not.toBeInTheDocument();
+    expect(screen.getByText("Total games").parentElement).toHaveTextContent("2");
+    await user.click(
+      screen.getByRole("checkbox", { name: "Show software & tools" }),
+    );
+    expect(screen.getByText("Benchmark Tool")).toBeInTheDocument();
+    expect(screen.getByText("application")).toBeInTheDocument();
+    expect(screen.getByText("Total items").parentElement).toHaveTextContent("3");
+  });
+
+  it("sorts by clicking table headers and toggles direction", async () => {
+    const user = userEvent.setup();
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === "get_auth_state") return completeView;
+      return undefined;
+    });
+    render(<App />);
+
+    const storageHeader = await screen.findByRole("columnheader", {
+      name: /Storage/,
+    });
+    const playtimeHeader = screen.getByRole("columnheader", {
+      name: "Playtime",
+    });
+    const remainingHeader = screen.getByRole("columnheader", {
+      name: "Remaining",
+    });
+    const headers = screen.getAllByRole("columnheader");
+    expect(headers.indexOf(remainingHeader)).toBe(headers.indexOf(playtimeHeader) + 1);
+    expect(screen.queryByRole("combobox", { name: "Sort library" })).toBeNull();
+    await user.click(storageHeader);
+    expect(storageHeader).toHaveAttribute("aria-sort", "descending");
+    await user.click(storageHeader);
+    expect(storageHeader).toHaveAttribute("aria-sort", "ascending");
   });
 
   it("shows non-blocking library-wide depot progress", async () => {
@@ -336,6 +478,85 @@ describe("library calculations", () => {
     expect(metrics?.lowerSizeBytes).toBe(2 * gib);
     expect(metrics?.sources).toEqual(["local"]);
     expect(metrics?.lowerHoursPerGiB).toBe(5);
+  });
+
+  it("subtracts played time from the selected completion target", () => {
+    const metrics = getRemainingMetrics(games[0], "depot", "main_extra");
+
+    expect(metrics?.remainingHours).toBe(20);
+    expect(metrics?.lowerHoursPerGiB).toBe(10);
+    expect(metrics?.upperHoursPerGiB).toBe(10);
+  });
+
+  it("calculates remaining time without requiring a storage estimate", () => {
+    const gameWithoutSize = {
+      ...games[0],
+      installed: false,
+      localSizeBytes: null,
+      depotSizeBytes: null,
+      communitySizeBytes: null,
+    };
+
+    expect(getRemainingTime(gameWithoutSize, "main_extra")?.remainingHours).toBe(
+      20,
+    );
+    expect(getRemainingMetrics(gameWithoutSize, "depot", "main_extra")).toBeNull();
+  });
+
+  it("uses the closest available HLTB estimate for each completion level", () => {
+    const estimate = {
+      ...games[0].hltb!,
+      mainSeconds: 2 * 3600,
+      mainExtraSeconds: null,
+      completionistSeconds: 10 * 3600,
+    };
+
+    expect(getHltbTarget(estimate, "main")).toEqual({
+      seconds: 2 * 3600,
+      fallbackExplanation: null,
+    });
+    expect(getHltbTarget(estimate, "main_extra")).toEqual({
+      seconds: 6 * 3600,
+      fallbackExplanation:
+        "Main + Extras is unavailable, so this uses the midpoint between Main Story and Completionist.",
+    });
+    expect(getHltbTarget(estimate, "completionist")).toEqual({
+      seconds: 10 * 3600,
+      fallbackExplanation: null,
+    });
+  });
+
+  it("falls outward through the remaining HLTB categories", () => {
+    const completionistOnly = {
+      ...games[0].hltb!,
+      mainSeconds: null,
+      mainExtraSeconds: null,
+      completionistSeconds: 10 * 3600,
+    };
+    const mainOnly = {
+      ...completionistOnly,
+      mainSeconds: 2 * 3600,
+      completionistSeconds: null,
+    };
+
+    expect(getHltbTarget(completionistOnly, "main")?.seconds).toBe(
+      10 * 3600,
+    );
+    expect(getHltbTarget(completionistOnly, "main_extra")?.seconds).toBe(
+      10 * 3600,
+    );
+    expect(getHltbTarget(mainOnly, "completionist")?.seconds).toBe(2 * 3600);
+  });
+
+  it("keeps a match even when HLTB has no completion data", () => {
+    const noTimes = {
+      ...games[0].hltb!,
+      mainSeconds: null,
+      mainExtraSeconds: null,
+      completionistSeconds: null,
+    };
+
+    expect(getHltbTarget(noTimes, "main_extra")).toBeNull();
   });
 
   it("turns differing estimates into a range", () => {
@@ -453,6 +674,11 @@ describe("library calculations", () => {
       rangePercent: 0,
       capped: true,
     });
+    expect(getAdaptiveBarWidths(200, 200, scaleMaximum / gib)).toEqual({
+      basePercent: 100,
+      rangePercent: 0,
+      capped: true,
+    });
   });
 
   it("splits cumulative storage into the previous total and new game", () => {
@@ -502,6 +728,24 @@ describe("library calculations", () => {
     });
 
     expect(result.map((game) => game.name)).toEqual(["Installed Hero"]);
+  });
+
+  it("filters non-game Steam applications unless explicitly included", () => {
+    const software = {
+      ...games[0],
+      appType: "application",
+    };
+    const result = filterAndSortGames([games[0], software], {
+      query: "",
+      scope: "all",
+      hideShared: false,
+      hideIncompatible: false,
+      showNonGames: false,
+      sort: "name",
+      sourceMode: "depot",
+    });
+
+    expect(result).toEqual([games[0]]);
   });
 
   it("recalculates cumulative ranges from the visible games", () => {

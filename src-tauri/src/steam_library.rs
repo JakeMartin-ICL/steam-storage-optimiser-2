@@ -1,8 +1,10 @@
 use crate::depot_metadata::{AppIdentity, parse_app_identity};
+use crate::hltb::HltbEstimate;
 use prost::Message;
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
+use steamroom::apps::AccessToken;
 use steamroom::client::{LoggedIn, SteamClient};
 use steamroom::depot::AppId;
 use steamroom::depot::PackageId;
@@ -21,11 +23,22 @@ pub enum DepotEstimateStatus {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HltbStatus {
+    #[default]
+    Pending,
+    Matched,
+    Unmatched,
+    NotApplicable,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GamePreview {
     pub app_id: u32,
     pub name: String,
+    pub app_type: String,
     pub playtime_minutes: Option<i32>,
     pub shared_only: bool,
     pub installed: bool,
@@ -39,6 +52,8 @@ pub struct GamePreview {
     pub depot_warnings: Vec<String>,
     pub depot_error: Option<String>,
     pub community_size_bytes: Option<u64>,
+    pub hltb: Option<HltbEstimate>,
+    pub hltb_status: HltbStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -54,9 +69,9 @@ pub struct OwnedLibrary {
     pub shared_only_count: usize,
 }
 
-pub async fn get_shared_candidate_identities(
+pub async fn get_app_identities(
     client: &SteamClient<LoggedIn>,
-    candidate_app_ids: &std::collections::HashSet<u32>,
+    candidate_app_ids: &HashSet<u32>,
 ) -> Result<Vec<AppIdentity>, String> {
     let app_ids = candidate_app_ids
         .iter()
@@ -64,19 +79,61 @@ pub async fn get_shared_candidate_identities(
         .map(AppId)
         .collect::<Vec<_>>();
     let mut identities = Vec::new();
-    for app_batch in app_ids.chunks(100) {
-        let tokens = client
+    for app_batch in app_ids.chunks(25) {
+        let mut tokens = client
             .pics_get_access_tokens(app_batch)
             .await
             .map_err(|error| error.to_string())?;
+        let token_app_ids = tokens
+            .iter()
+            .map(|token| token.app_id)
+            .collect::<HashSet<_>>();
+        tokens.extend(
+            app_batch
+                .iter()
+                .filter(|app_id| !token_app_ids.contains(app_id))
+                .map(|app_id| AccessToken {
+                    app_id: *app_id,
+                    token: 0,
+                }),
+        );
         let infos = client
             .pics_get_product_info(&tokens)
             .await
             .map_err(|error| error.to_string())?;
-        identities.extend(infos.into_iter().filter_map(|info| {
-            let app_id = info.app_id?.0;
-            parse_app_identity(app_id, info.kv_data.as_deref()?).ok()
-        }));
+        let mut product_buffers = infos
+            .into_iter()
+            .filter_map(|info| Some((info.app_id?.0, info.kv_data?)))
+            .collect::<BTreeMap<_, _>>();
+
+        // Steam can split a PICS reply across messages, while steamroom 0.3
+        // returns the first response. Retry omitted apps individually so they
+        // are not left as "unknown" and accidentally treated as games.
+        let missing_app_ids = app_batch
+            .iter()
+            .filter(|app_id| !product_buffers.contains_key(&app_id.0))
+            .copied()
+            .collect::<Vec<_>>();
+        for app_id in missing_app_ids {
+            let token = tokens
+                .iter()
+                .find(|token| token.app_id == app_id)
+                .cloned()
+                .unwrap_or(AccessToken { app_id, token: 0 });
+            if let Ok(infos) = client.pics_get_product_info(&[token]).await {
+                product_buffers.extend(
+                    infos
+                        .into_iter()
+                        .filter_map(|info| Some((info.app_id?.0, info.kv_data?))),
+                );
+            }
+        }
+
+        identities.extend(
+            product_buffers
+                .into_iter()
+                .filter_map(|(app_id, buffer)| parse_app_identity(app_id, &buffer).ok()),
+        );
     }
     identities.sort_by_key(|app| app.app_id);
     identities.dedup_by_key(|app| app.app_id);
@@ -123,6 +180,17 @@ fn avatar_url(hash: &[u8]) -> Option<String> {
 }
 
 impl OwnedLibrary {
+    pub fn apply_app_identities(&mut self, identities: &[AppIdentity]) {
+        for game in &mut self.preview {
+            if let Some(identity) = identities
+                .iter()
+                .find(|identity| identity.app_id == game.app_id)
+            {
+                game.app_type = identity.app_type.clone();
+            }
+        }
+    }
+
     pub fn merge_shared_games(
         &mut self,
         identities: &[AppIdentity],
@@ -140,6 +208,7 @@ impl OwnedLibrary {
                 .map(|app| GamePreview {
                     app_id: app.app_id,
                     name: app.name.clone(),
+                    app_type: app.app_type.clone(),
                     playtime_minutes: Some(
                         local_playtimes
                             .get(&app.app_id)
@@ -159,6 +228,8 @@ impl OwnedLibrary {
                     depot_warnings: Vec::new(),
                     depot_error: None,
                     community_size_bytes: None,
+                    hltb: None,
+                    hltb_status: HltbStatus::Pending,
                 }),
         );
         self.shared_only_count = self.preview.iter().filter(|game| game.shared_only).count();
@@ -299,6 +370,7 @@ pub async fn get_owned_games(
             Some(GamePreview {
                 app_id: u32::try_from(game.appid?).ok()?,
                 name: game.name.unwrap_or_else(|| "Unknown game".to_string()),
+                app_type: "unknown".to_string(),
                 playtime_minutes: Some(game.playtime_forever.unwrap_or(0).max(0)),
                 shared_only: shared_only_app_ids.contains(&u32::try_from(game.appid?).ok()?),
                 installed: false,
@@ -312,6 +384,8 @@ pub async fn get_owned_games(
                 depot_warnings: Vec::new(),
                 depot_error: None,
                 community_size_bytes: None,
+                hltb: None,
+                hltb_status: HltbStatus::Pending,
             })
         })
         .collect();
@@ -438,6 +512,7 @@ mod tests {
             preview: vec![GamePreview {
                 app_id: 1,
                 name: "Owned".to_string(),
+                app_type: "game".to_string(),
                 playtime_minutes: Some(60),
                 shared_only: false,
                 installed: false,
@@ -451,6 +526,8 @@ mod tests {
                 depot_warnings: Vec::new(),
                 depot_error: None,
                 community_size_bytes: None,
+                hltb: None,
+                hltb_status: HltbStatus::Pending,
             }],
             shared_only_count: 0,
         };
@@ -481,6 +558,28 @@ mod tests {
         assert_eq!(library.preview[0].playtime_minutes, Some(120));
         assert_eq!(library.preview[2].app_id, 3);
         assert_eq!(library.preview[2].playtime_minutes, Some(0));
+    }
+
+    #[test]
+    fn applies_steam_application_types_to_owned_items() {
+        let mut library = OwnedLibrary {
+            count: 1,
+            preview: vec![GamePreview {
+                app_id: 223850,
+                name: "3DMark".to_string(),
+                app_type: "unknown".to_string(),
+                ..Default::default()
+            }],
+            shared_only_count: 0,
+        };
+
+        library.apply_app_identities(&[AppIdentity {
+            app_id: 223850,
+            name: "3DMark".to_string(),
+            app_type: "application".to_string(),
+        }]);
+
+        assert_eq!(library.preview[0].app_type, "application");
     }
 
     #[test]

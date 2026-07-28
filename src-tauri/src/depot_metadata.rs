@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use steamroom::types::{KeyValue, KvValue};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -6,7 +7,7 @@ pub struct AppDepotMetadata {
     pub depots: Vec<DepotMetadata>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct AppIdentity {
     pub app_id: u32,
     pub name: String,

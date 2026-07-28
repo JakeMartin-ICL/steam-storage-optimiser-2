@@ -1,3 +1,4 @@
+use crate::app_identity_cache::AppIdentityCache;
 use crate::community_contribution_cache::CommunityContributionCache;
 use crate::community_sizes::CommunitySizeClient;
 use crate::credential_store::{
@@ -10,11 +11,13 @@ use crate::depot_probe::{
     run_depot_probe,
 };
 use crate::depot_selection::TargetOs;
+use crate::hltb::{HltbCandidate, HltbClient, HltbError, select_match};
+use crate::hltb_cache::HltbCache;
 use crate::local_steam::{InstalledApp, discover_installed_apps, discover_local_playtimes};
 use crate::package_entitlements::resolve_package_entitlements;
 use crate::steam_library::{
-    DepotEstimateStatus, GamePreview, SteamProfile, get_account_packages, get_owned_games,
-    get_player_profile, get_shared_candidate_identities,
+    DepotEstimateStatus, GamePreview, HltbStatus, SteamProfile, get_account_packages,
+    get_app_identities, get_owned_games, get_player_profile,
 };
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -41,6 +44,8 @@ pub struct AuthView {
     community_error: Option<String>,
     depot_error: Option<String>,
     depot_progress: Option<DepotProgress>,
+    hltb_error: Option<String>,
+    hltb_progress: Option<HltbProgress>,
     profile: Option<SteamProfile>,
 }
 
@@ -51,6 +56,15 @@ pub struct DepotProgress {
     total: usize,
     available: usize,
     unavailable: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HltbProgress {
+    completed: usize,
+    total: usize,
+    matched: usize,
+    unmatched: usize,
 }
 
 impl Default for AuthView {
@@ -67,6 +81,8 @@ impl Default for AuthView {
             community_error: None,
             depot_error: None,
             depot_progress: None,
+            hltb_error: None,
+            hltb_progress: None,
             profile: None,
         }
     }
@@ -76,6 +92,8 @@ impl Default for AuthView {
 pub struct SpikeState {
     view: Arc<RwLock<AuthView>>,
     task: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+    hltb_task: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+    hltb_cache_gate: Arc<Mutex<()>>,
 }
 
 #[tauri::command]
@@ -97,6 +115,9 @@ pub async fn start_qr_login(
     let state = state.inner().clone();
     let mut task_slot = state.task.lock().await;
     if let Some(task) = task_slot.take() {
+        task.abort();
+    }
+    if let Some(task) = state.hltb_task.lock().await.take() {
         task.abort();
     }
     drop(task_slot);
@@ -132,6 +153,9 @@ pub async fn cancel_qr_login(state: State<'_, SpikeState>) -> Result<(), String>
     if let Some(task) = state.task.lock().await.take() {
         task.abort();
     }
+    if let Some(task) = state.hltb_task.lock().await.take() {
+        task.abort();
+    }
     *state.view.write().await = AuthView::default();
     Ok(())
 }
@@ -141,8 +165,66 @@ pub async fn forget_saved_login(state: State<'_, SpikeState>) -> Result<(), Stri
     if let Some(task) = state.task.lock().await.take() {
         task.abort();
     }
+    if let Some(task) = state.hltb_task.lock().await.take() {
+        task.abort();
+    }
     delete_saved_login().await?;
     *state.view.write().await = AuthView::default();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn search_hltb(query: String) -> Result<Vec<HltbCandidate>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = loop {
+        match HltbClient::new().await {
+            Ok(client) => break client,
+            Err(HltbError::RateLimited {
+                retry_after: Some(delay),
+                ..
+            }) => tokio::time::sleep(delay.max(std::time::Duration::from_secs(1))).await,
+            Err(error) => return Err(error.to_string()),
+        }
+    };
+    loop {
+        match client.search(query, query).await {
+            Ok(candidates) => return Ok(candidates),
+            Err(HltbError::RateLimited {
+                retry_after: Some(delay),
+                ..
+            }) => tokio::time::sleep(delay.max(std::time::Duration::from_secs(1))).await,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn set_hltb_match(
+    state: State<'_, SpikeState>,
+    app_id: u32,
+    candidate: Option<HltbCandidate>,
+) -> Result<(), String> {
+    let estimate = candidate.map(|candidate| candidate.to_estimate("manual"));
+    {
+        let _gate = state.hltb_cache_gate.lock().await;
+        let mut cache = HltbCache::load().await;
+        cache.insert(app_id, estimate.clone(), true, SystemTime::now());
+        cache.save().await?;
+    }
+    set_view(state.inner(), |view| {
+        if let Some(game) = view.games.iter_mut().find(|game| game.app_id == app_id) {
+            game.hltb = estimate;
+            game.hltb_status = if game.hltb.is_some() {
+                HltbStatus::Matched
+            } else {
+                HltbStatus::Unmatched
+            };
+        }
+    })
+    .await;
     Ok(())
 }
 
@@ -254,14 +336,43 @@ async fn run_authenticated_checks(
     .await;
     let shared_only_app_ids = entitlements.shared_only_app_ids();
     let mut library = get_owned_games(&client, steam_id, &shared_only_app_ids).await?;
-    let shared_identities = get_shared_candidate_identities(&client, &shared_only_app_ids).await?;
+    set_view(state, |view| {
+        view.message = "Classifying Steam games, software, and tools…".to_string();
+    })
+    .await;
+    let mut identity_app_ids = shared_only_app_ids.clone();
+    identity_app_ids.extend(library.preview.iter().map(|game| game.app_id));
+    let now = SystemTime::now();
+    let mut app_identity_cache = AppIdentityCache::load().await;
+    let mut app_identities = Vec::with_capacity(identity_app_ids.len());
+    let mut uncached_app_ids = std::collections::HashSet::new();
+    for app_id in &identity_app_ids {
+        if let Some(identity) = app_identity_cache.get(*app_id) {
+            app_identities.push(identity);
+        } else {
+            uncached_app_ids.insert(*app_id);
+        }
+    }
+    let fetched_identities = get_app_identities(&client, &uncached_app_ids).await?;
+    for identity in &fetched_identities {
+        app_identity_cache.insert(identity, now);
+    }
+    if !fetched_identities.is_empty()
+        && let Err(error) = app_identity_cache.save().await
+    {
+        #[cfg(debug_assertions)]
+        eprintln!("APP_TYPE_CACHE_ERROR={error}");
+    }
+    app_identities.extend(fetched_identities);
+    app_identities.sort_by_key(|identity| identity.app_id);
+    library.apply_app_identities(&app_identities);
     #[cfg(debug_assertions)]
-    let shared_games = shared_identities
+    let shared_games = app_identities
         .iter()
-        .filter(|app| app.app_type == "game")
+        .filter(|app| shared_only_app_ids.contains(&app.app_id) && app.app_type == "game")
         .collect::<Vec<_>>();
     let local_playtimes = discover_local_playtimes(steam_id as u32).unwrap_or_default();
-    library.merge_shared_games(&shared_identities, &local_playtimes);
+    library.merge_shared_games(&app_identities, &local_playtimes);
     let installed_apps = discover_installed_apps().unwrap_or_default();
     for game in &mut library.preview {
         if let Some(installed) = installed_apps
@@ -314,6 +425,49 @@ async fn run_authenticated_checks(
         game.community_size_bytes = community_sizes.get(&game.app_id).map(|size| size.size);
     }
 
+    let hltb_cache = HltbCache::load().await;
+    let now = SystemTime::now();
+    let mut hltb_progress = HltbProgress {
+        total: library
+            .preview
+            .iter()
+            .filter(|game| game.app_type == "game" || game.app_type == "unknown")
+            .count(),
+        ..Default::default()
+    };
+    let mut pending_hltb = Vec::new();
+    for game in &mut library.preview {
+        if game.app_type != "game" && game.app_type != "unknown" {
+            game.hltb_status = HltbStatus::NotApplicable;
+            continue;
+        }
+        let cached = hltb_cache.get(game.app_id);
+        if let Some(cached) = cached {
+            game.hltb = cached.estimate.clone();
+            if cached.estimate.is_some() {
+                game.hltb_status = HltbStatus::Matched;
+            }
+            if HltbCache::is_fresh(cached, now) {
+                hltb_progress.completed += 1;
+                if cached.estimate.is_some() {
+                    hltb_progress.matched += 1;
+                } else {
+                    hltb_progress.unmatched += 1;
+                    game.hltb_status = HltbStatus::Unmatched;
+                }
+                continue;
+            }
+        }
+        pending_hltb.push((
+            game.app_id,
+            game.name.clone(),
+            cached
+                .filter(|entry| entry.manual)
+                .and_then(|entry| entry.estimate.as_ref())
+                .map(|estimate| estimate.game_id),
+        ));
+    }
+
     let requests = library
         .preview
         .iter()
@@ -360,8 +514,18 @@ async fn run_authenticated_checks(
             "Library ready. Measuring Steam depot estimates…".to_string()
         };
         view.depot_progress = Some(progress.clone());
+        view.hltb_progress = Some(hltb_progress.clone());
     })
     .await;
+
+    if !pending_hltb.is_empty() {
+        let task_state = state.clone();
+        let task_progress = hltb_progress.clone();
+        let task = tauri::async_runtime::spawn(async move {
+            run_hltb_enrichment(&task_state, pending_hltb, task_progress).await;
+        });
+        *state.hltb_task.lock().await = Some(task);
+    }
 
     if contribute_community_sizes && community_error.is_none() {
         let installed_apps = installed_apps.clone();
@@ -433,7 +597,7 @@ async fn run_authenticated_checks(
             eprintln!("STEAM_DEPOT_CACHE_ERROR={}", sanitise_error(&error));
         }
         set_view(state, |view| {
-            view.games = library.preview.clone();
+            merge_depot_fields(&mut view.games, &library.preview);
             view.depot_progress = Some(progress.clone());
             view.message = format!(
                 "Measured Steam depot estimates for {} of {} games.",
@@ -556,7 +720,7 @@ async fn run_authenticated_checks(
             "Library updated. Steam depot estimates are available for {} of {} games.",
             progress.available, progress.total
         );
-        view.games = library.preview;
+        merge_depot_fields(&mut view.games, &library.preview);
         view.probe = probe;
         view.depot_error = if progress.available == 0 {
             last_batch_error.or(probe_error)
@@ -578,6 +742,169 @@ fn apply_depot_estimate(games: &mut [GamePreview], estimate: &DepotEstimate) {
         game.current_os_supported = Some(estimate.current_os_supported);
         game.depot_warnings = estimate.warnings.clone();
         game.depot_error = None;
+    }
+}
+
+fn merge_depot_fields(target: &mut [GamePreview], source: &[GamePreview]) {
+    for source_game in source {
+        if let Some(target_game) = target
+            .iter_mut()
+            .find(|game| game.app_id == source_game.app_id)
+        {
+            target_game.depot_size_bytes = source_game.depot_size_bytes;
+            target_game.depot_status = source_game.depot_status;
+            target_game.depot_exact = source_game.depot_exact;
+            target_game.depot_count = source_game.depot_count;
+            target_game.depot_os = source_game.depot_os.clone();
+            target_game.current_os_supported = source_game.current_os_supported;
+            target_game.depot_warnings = source_game.depot_warnings.clone();
+            target_game.depot_error = source_game.depot_error.clone();
+        }
+    }
+}
+
+async fn run_hltb_enrichment(
+    state: &SpikeState,
+    pending: Vec<(u32, String, Option<i64>)>,
+    mut progress: HltbProgress,
+) {
+    let mut connection_attempts = 0_u32;
+    let client = loop {
+        match HltbClient::new().await {
+            Ok(client) => break client,
+            Err(HltbError::RateLimited {
+                retry_after,
+                message,
+            }) => {
+                connection_attempts += 1;
+                let delay = retry_after.unwrap_or_else(|| {
+                    std::time::Duration::from_secs(
+                        60_u64.saturating_mul(2_u64.pow(connection_attempts - 1)),
+                    )
+                });
+                set_view(state, |view| {
+                    view.hltb_error = Some(format!(
+                        "{message}. Resuming in {} seconds.",
+                        delay.as_secs()
+                    ));
+                })
+                .await;
+                if retry_after.is_none() && connection_attempts >= 3 {
+                    return;
+                }
+                tokio::time::sleep(delay.max(std::time::Duration::from_secs(1))).await;
+            }
+            Err(error) => {
+                set_view(state, |view| {
+                    view.hltb_error = Some(sanitise_error(&error.to_string()))
+                })
+                .await;
+                return;
+            }
+        }
+    };
+    let mut first_request = true;
+    for (app_id, name, queued_preferred_id) in pending {
+        if !first_request {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        first_request = false;
+
+        let mut rate_limit_attempts = 0_u32;
+        let candidates = loop {
+            match client.search(&name, &name).await {
+                Ok(candidates) => {
+                    set_view(state, |view| view.hltb_error = None).await;
+                    break candidates;
+                }
+                Err(HltbError::RateLimited {
+                    retry_after,
+                    message,
+                }) => {
+                    rate_limit_attempts += 1;
+                    let delay = retry_after.unwrap_or_else(|| {
+                        std::time::Duration::from_secs(
+                            60_u64.saturating_mul(2_u64.pow(rate_limit_attempts - 1)),
+                        )
+                    });
+                    set_view(state, |view| {
+                        view.hltb_error = Some(format!(
+                            "{message}. Resuming in {} seconds.",
+                            delay.as_secs()
+                        ));
+                    })
+                    .await;
+                    if retry_after.is_none() && rate_limit_attempts >= 3 {
+                        return;
+                    }
+                    tokio::time::sleep(delay.max(std::time::Duration::from_secs(1))).await;
+                }
+                Err(error) => {
+                    set_view(state, |view| {
+                        view.hltb_error = Some(sanitise_error(&error.to_string()));
+                    })
+                    .await;
+                    return;
+                }
+            }
+        };
+
+        let (preferred_id, preserve_manual) = {
+            let _gate = state.hltb_cache_gate.lock().await;
+            let cache = HltbCache::load().await;
+            let current = cache.get(app_id);
+            let current_preferred = current
+                .filter(|entry| entry.manual)
+                .and_then(|entry| entry.estimate.as_ref())
+                .map(|estimate| estimate.game_id);
+            let manual_changed = current.is_some_and(|entry| {
+                entry.manual
+                    && (entry.estimate.is_none() || current_preferred != queued_preferred_id)
+            });
+            (current_preferred.or(queued_preferred_id), manual_changed)
+        };
+
+        let mut estimate = select_match(&candidates, app_id, preferred_id);
+        let mut manual = preferred_id.is_some();
+        if preserve_manual {
+            let _gate = state.hltb_cache_gate.lock().await;
+            let cache = HltbCache::load().await;
+            estimate = cache.get(app_id).and_then(|entry| entry.estimate.clone());
+            manual = true;
+        } else if preferred_id.is_some() && estimate.is_none() {
+            let _gate = state.hltb_cache_gate.lock().await;
+            let cache = HltbCache::load().await;
+            estimate = cache.get(app_id).and_then(|entry| entry.estimate.clone());
+        }
+
+        let save_result = {
+            let _gate = state.hltb_cache_gate.lock().await;
+            let mut cache = HltbCache::load().await;
+            cache.insert(app_id, estimate.clone(), manual, SystemTime::now());
+            cache.save().await
+        };
+        if let Err(error) = save_result {
+            set_view(state, |view| view.hltb_error = Some(sanitise_error(&error))).await;
+        }
+
+        progress.completed += 1;
+        if estimate.is_some() {
+            progress.matched += 1;
+        } else {
+            progress.unmatched += 1;
+        }
+        set_view(state, |view| {
+            if let Some(game) = view.games.iter_mut().find(|game| game.app_id == app_id) {
+                game.hltb = estimate.clone();
+                game.hltb_status = if estimate.is_some() {
+                    HltbStatus::Matched
+                } else {
+                    HltbStatus::Unmatched
+                };
+            }
+            view.hltb_progress = Some(progress.clone());
+        })
+        .await;
     }
 }
 

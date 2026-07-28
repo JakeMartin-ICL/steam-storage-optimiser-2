@@ -6,10 +6,12 @@ import "./App.css";
 let autoResumeAttempted = false;
 const contributionPreferenceKey = "contribute-community-sizes";
 const storageTargetPreferenceKey = "storage-target-bytes";
+const completionModePreferenceKey = "hltb-completion-mode";
 
 export type LibraryGame = {
   appId: number;
   name: string;
+  appType: string;
   playtimeMinutes: number | null;
   sharedOnly: boolean;
   installed: boolean;
@@ -23,6 +25,23 @@ export type LibraryGame = {
   depotWarnings: string[];
   depotError: string | null;
   communitySizeBytes: number | null;
+  hltb: HltbEstimate | null;
+  hltbStatus: "pending" | "matched" | "unmatched" | "not_applicable";
+};
+
+export type HltbEstimate = {
+  gameId: number;
+  gameName: string;
+  mainSeconds: number | null;
+  mainExtraSeconds: number | null;
+  completionistSeconds: number | null;
+  steamAppId: number | null;
+  matchMethod: "steam_app_id" | "title" | "manual";
+};
+
+export type HltbCandidate = Omit<HltbEstimate, "matchMethod"> & {
+  platforms: string;
+  similarity: number;
 };
 
 export type DepotResult = {
@@ -56,6 +75,8 @@ export type AuthView = {
   communityError: string | null;
   depotError: string | null;
   depotProgress: DepotProgress | null;
+  hltbError: string | null;
+  hltbProgress: HltbProgress | null;
   profile: SteamProfile | null;
 };
 
@@ -81,6 +102,13 @@ export type DepotProgress = {
   unavailable: number;
 };
 
+export type HltbProgress = {
+  completed: number;
+  total: number;
+  matched: number;
+  unmatched: number;
+};
+
 export const initialAuthView: AuthView = {
   phase: "idle",
   message: "Connect Steam to build your storage-aware library.",
@@ -93,12 +121,27 @@ export const initialAuthView: AuthView = {
   communityError: null,
   depotError: null,
   depotProgress: null,
+  hltbError: null,
+  hltbProgress: null,
   profile: null,
 };
 
 export type SourceMode = "depot" | "community" | "compare";
 export type LibraryScope = "all" | "installed" | "uninstalled";
-export type SortMode = "efficiency" | "playtime" | "size" | "name";
+export type SortMode =
+  | "efficiency"
+  | "remaining"
+  | "remaining_hours"
+  | "playtime"
+  | "size"
+  | "name";
+export type CompletionMode = "main" | "main_extra" | "completionist";
+export type SortDirection = "ascending" | "descending";
+
+export type EfficiencyMetric = {
+  lowerHoursPerGiB: number | null;
+  upperHoursPerGiB: number | null;
+} | null;
 
 export type GameMetrics = {
   lowerSizeBytes: number;
@@ -108,6 +151,23 @@ export type GameMetrics = {
   sources: Array<"local" | "depot" | "community">;
   fallback: boolean;
   collapsedComparison: boolean;
+} | null;
+
+export type RemainingMetrics = {
+  lowerHoursPerGiB: number;
+  upperHoursPerGiB: number;
+  remainingHours: number;
+  fallbackExplanation: string | null;
+} | null;
+
+export type RemainingTime = {
+  remainingHours: number;
+  fallbackExplanation: string | null;
+} | null;
+
+export type HltbTarget = {
+  seconds: number;
+  fallbackExplanation: string | null;
 } | null;
 
 export type CumulativeSize = {
@@ -237,6 +297,110 @@ export function hasLargeSizeDiscrepancy(game: LibraryGame) {
   );
 }
 
+export function getRemainingMetrics(
+  game: LibraryGame,
+  sourceMode: SourceMode,
+  completionMode: CompletionMode,
+): RemainingMetrics {
+  const size = getGameMetrics(game, sourceMode);
+  const remaining = getRemainingTime(game, completionMode);
+  if (!size || !remaining) return null;
+  return {
+    remainingHours: remaining.remainingHours,
+    lowerHoursPerGiB:
+      remaining.remainingHours / (size.upperSizeBytes / gib),
+    upperHoursPerGiB:
+      remaining.remainingHours / (size.lowerSizeBytes / gib),
+    fallbackExplanation: remaining.fallbackExplanation,
+  };
+}
+
+export function getRemainingTime(
+  game: LibraryGame,
+  completionMode: CompletionMode,
+): RemainingTime {
+  if (game.playtimeMinutes === null || !game.hltb) return null;
+  const target = getHltbTarget(game.hltb, completionMode);
+  if (!target) return null;
+  return {
+    remainingHours: Math.max(
+      target.seconds / 3600 - game.playtimeMinutes / 60,
+      0,
+    ),
+    fallbackExplanation: target.fallbackExplanation,
+  };
+}
+
+export function getHltbTarget(
+  estimate: HltbEstimate,
+  completionMode: CompletionMode,
+): HltbTarget {
+  const main = estimate.mainSeconds;
+  const extras = estimate.mainExtraSeconds;
+  const completionist = estimate.completionistSeconds;
+  if (completionMode === "main") {
+    if (main) return { seconds: main, fallbackExplanation: null };
+    if (extras) {
+      return {
+        seconds: extras,
+        fallbackExplanation:
+          "Main Story is unavailable, so this uses Main + Extras.",
+      };
+    }
+    if (completionist) {
+      return {
+        seconds: completionist,
+        fallbackExplanation:
+          "Main Story and Main + Extras are unavailable, so this uses Completionist.",
+      };
+    }
+    return null;
+  }
+  if (completionMode === "main_extra") {
+    if (extras) return { seconds: extras, fallbackExplanation: null };
+    if (main && completionist) {
+      return {
+        seconds: (main + completionist) / 2,
+        fallbackExplanation:
+          "Main + Extras is unavailable, so this uses the midpoint between Main Story and Completionist.",
+      };
+    }
+    if (completionist) {
+      return {
+        seconds: completionist,
+        fallbackExplanation:
+          "Main + Extras is unavailable, so this uses Completionist.",
+      };
+    }
+    if (main) {
+      return {
+        seconds: main,
+        fallbackExplanation:
+          "Main + Extras is unavailable, so this uses Main Story.",
+      };
+    }
+    return null;
+  }
+  if (completionist) {
+    return { seconds: completionist, fallbackExplanation: null };
+  }
+  if (extras) {
+    return {
+      seconds: extras,
+      fallbackExplanation:
+        "Completionist is unavailable, so this uses Main + Extras.",
+    };
+  }
+  if (main) {
+    return {
+      seconds: main,
+      fallbackExplanation:
+        "Completionist and Main + Extras are unavailable, so this uses Main Story.",
+    };
+  }
+  return null;
+}
+
 export function filterAndSortGames(
   games: LibraryGame[],
   options: {
@@ -244,8 +408,11 @@ export function filterAndSortGames(
     scope: LibraryScope;
     hideShared: boolean;
     hideIncompatible: boolean;
+    showNonGames?: boolean;
     sort: SortMode;
+    sortDirection?: SortDirection;
     sourceMode: SourceMode;
+    completionMode?: CompletionMode;
   },
 ) {
   const query = options.query.trim().toLocaleLowerCase();
@@ -255,33 +422,70 @@ export function filterAndSortGames(
       if (options.hideShared && game.sharedOnly) return false;
       if (options.hideIncompatible && game.currentOsSupported === false)
         return false;
+      if (
+        options.showNonGames === false &&
+        game.appType !== "game" &&
+        game.appType !== "unknown"
+      )
+        return false;
       if (options.scope === "installed" && !game.installed) return false;
       if (options.scope === "uninstalled" && game.installed) return false;
       return true;
     })
     .sort((left, right) => {
+      const defaultDirection =
+        options.sort === "name" ? "ascending" : "descending";
+      const applyDirection = (comparison: number) =>
+        options.sortDirection &&
+        options.sortDirection !== defaultDirection
+          ? -comparison
+          : comparison;
       const leftMetric = getGameMetrics(left, options.sourceMode);
       const rightMetric = getGameMetrics(right, options.sourceMode);
-      if (options.sort === "name") return left.name.localeCompare(right.name);
+      if (options.sort === "remaining") {
+        const completionMode = options.completionMode ?? "main_extra";
+        return applyDirection(
+          (getRemainingMetrics(right, options.sourceMode, completionMode)
+            ?.lowerHoursPerGiB ?? -1) -
+            (getRemainingMetrics(left, options.sourceMode, completionMode)
+              ?.lowerHoursPerGiB ?? -1) ||
+            left.name.localeCompare(right.name),
+        );
+      }
+      if (options.sort === "remaining_hours") {
+        const completionMode = options.completionMode ?? "main_extra";
+        return applyDirection(
+          (getRemainingTime(right, completionMode)?.remainingHours ?? -1) -
+            (getRemainingTime(left, completionMode)?.remainingHours ?? -1) ||
+            left.name.localeCompare(right.name),
+        );
+      }
+      if (options.sort === "name") {
+        return applyDirection(left.name.localeCompare(right.name));
+      }
       if (options.sort === "playtime") {
-        return (
+        return applyDirection(
           (right.playtimeMinutes ?? -1) - (left.playtimeMinutes ?? -1) ||
-          left.name.localeCompare(right.name)
+            left.name.localeCompare(right.name),
         );
       }
       if (options.sort === "size") {
-        return (
+        return applyDirection(
           (rightMetric?.upperSizeBytes ?? -1) -
             (leftMetric?.upperSizeBytes ?? -1) ||
-          left.name.localeCompare(right.name)
+            left.name.localeCompare(right.name),
         );
       }
-      return (
+      return applyDirection(
         (rightMetric?.lowerHoursPerGiB ?? -1) -
           (leftMetric?.lowerHoursPerGiB ?? -1) ||
-        left.name.localeCompare(right.name)
+          left.name.localeCompare(right.name),
       );
     });
+}
+
+function isGameApplication(game: LibraryGame) {
+  return game.appType === "game" || game.appType === "unknown";
 }
 
 export function buildCumulativeSizes(
@@ -304,7 +508,7 @@ export function buildCumulativeSizes(
 }
 
 export function getEfficiencyBarWidths(
-  metrics: GameMetrics,
+  metrics: EfficiencyMetric,
 ): EfficiencyBarWidths | null {
   if (!metrics || metrics.lowerHoursPerGiB === null) return null;
   const upperHours = metrics.upperHoursPerGiB ?? metrics.lowerHoursPerGiB;
@@ -324,18 +528,31 @@ export function getStorageBarWidths(
   maximumSizeBytes: number,
 ): StorageBarWidths | null {
   if (!metrics || maximumSizeBytes <= 0) return null;
+  return getAdaptiveBarWidths(
+    metrics.lowerSizeBytes,
+    metrics.upperSizeBytes,
+    maximumSizeBytes,
+  );
+}
+
+export function getAdaptiveBarWidths(
+  lowerValue: number,
+  upperValue: number,
+  maximumValue: number,
+): StorageBarWidths | null {
+  if (maximumValue <= 0) return null;
   const basePercent = Math.min(
-    Math.max((metrics.lowerSizeBytes / maximumSizeBytes) * 100, 0),
+    Math.max((lowerValue / maximumValue) * 100, 0),
     100,
   );
   const upperPercent = Math.min(
-    Math.max((metrics.upperSizeBytes / maximumSizeBytes) * 100, 0),
+    Math.max((upperValue / maximumValue) * 100, 0),
     100,
   );
   return {
     basePercent,
     rangePercent: Math.max(upperPercent - basePercent, 0),
-    capped: metrics.upperSizeBytes > maximumSizeBytes,
+    capped: upperValue > maximumValue,
   };
 }
 
@@ -668,8 +885,20 @@ function LibraryApp({
   const [sourceMode, setSourceMode] = useState<SourceMode>("depot");
   const [scope, setScope] = useState<LibraryScope>("all");
   const [sort, setSort] = useState<SortMode>("efficiency");
+  const [sortDirection, setSortDirection] =
+    useState<SortDirection>("descending");
+  const [completionMode, setCompletionMode] = useState<CompletionMode>(() => {
+    try {
+      const saved = window.localStorage.getItem(completionModePreferenceKey);
+      if (saved === "main" || saved === "completionist") return saved;
+    } catch {
+      // Use the default when storage is unavailable.
+    }
+    return "main_extra";
+  });
   const [hideShared, setHideShared] = useState(false);
   const [hideIncompatible, setHideIncompatible] = useState(false);
+  const [showNonGames, setShowNonGames] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [storageTarget, setStorageTarget] = useState(() => {
     try {
@@ -715,6 +944,17 @@ function LibraryApp({
     };
   }, []);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        completionModePreferenceKey,
+        completionMode,
+      );
+    } catch {
+      // The selection still applies for this session.
+    }
+  }, [completionMode]);
+
   const visibleGames = useMemo(
     () =>
       filterAndSortGames(auth.games, {
@@ -722,17 +962,23 @@ function LibraryApp({
         scope,
         hideShared,
         hideIncompatible,
+        showNonGames,
         sort,
+        sortDirection,
         sourceMode,
+        completionMode,
       }),
     [
       auth.games,
       hideIncompatible,
       hideShared,
+      showNonGames,
       query,
       scope,
       sort,
+      sortDirection,
       sourceMode,
+      completionMode,
     ],
   );
   const cumulativeSizes = useMemo(
@@ -742,6 +988,12 @@ function LibraryApp({
   const maximumStorageSize = getStorageScaleMaximum(
     visibleGames.map(
       (game) => getGameMetrics(game, sourceMode)?.upperSizeBytes ?? 0,
+    ),
+  );
+  const maximumRemainingHours = getStorageScaleMaximum(
+    visibleGames.map(
+      (game) =>
+        getRemainingTime(game, completionMode)?.remainingHours ?? 0,
     ),
   );
   const maximumCumulativeSize =
@@ -761,13 +1013,16 @@ function LibraryApp({
     100;
   const selectedGame =
     auth.games.find((game) => game.appId === selectedId) ?? null;
-  const installedGames = auth.games.filter((game) => game.installed);
-  const sharedGames = auth.games.filter((game) => game.sharedOnly);
+  const includedLibraryGames = auth.games.filter(
+    (game) => showNonGames || isGameApplication(game),
+  );
+  const installedGames = includedLibraryGames.filter((game) => game.installed);
+  const sharedGames = includedLibraryGames.filter((game) => game.sharedOnly);
   const diskUsed = installedGames.reduce(
     (total, game) => total + (game.localSizeBytes ?? 0),
     0,
   );
-  const measurable = auth.games.filter(
+  const measurable = includedLibraryGames.filter(
     (game) => getGameMetrics(game, sourceMode)?.lowerHoursPerGiB !== null,
   );
   const averageEfficiency =
@@ -785,6 +1040,17 @@ function LibraryApp({
     }
   };
 
+  const updateSort = (nextSort: SortMode) => {
+    if (sort === nextSort) {
+      setSortDirection((current) =>
+        current === "ascending" ? "descending" : "ascending",
+      );
+      return;
+    }
+    setSort(nextSort);
+    setSortDirection(nextSort === "name" ? "ascending" : "descending");
+  };
+
   return (
     <main className="product-shell">
       <aside className="sidebar">
@@ -792,7 +1058,7 @@ function LibraryApp({
         <nav aria-label="Main navigation">
           <button className="nav-item active">
             <span aria-hidden="true">▦</span> Library
-            <small>{auth.games.length}</small>
+            <small>{includedLibraryGames.length}</small>
           </button>
         </nav>
         <div className="account-panel">
@@ -852,8 +1118,8 @@ function LibraryApp({
         <section className="summary-grid" aria-label="Library summary">
           <SummaryCard
             accent="blue"
-            label="Total games"
-            value={auth.games.length.toLocaleString()}
+            label={showNonGames ? "Total items" : "Total games"}
+            value={includedLibraryGames.length.toLocaleString()}
             detail={`${sharedGames.length} shared through Steam Family`}
             icon="▦"
           />
@@ -915,6 +1181,33 @@ function LibraryApp({
               </small>
             </div>
           )}
+        {auth.hltbError && (
+          <div className="notice-banner">
+            <span>!</span>
+            {auth.hltbError}
+          </div>
+        )}
+        {auth.hltbProgress &&
+          auth.hltbProgress.completed < auth.hltbProgress.total && (
+            <div className="depot-progress hltb-progress" aria-live="polite">
+              <span>
+                Matching HowLongToBeat data{" "}
+                <strong>
+                  {auth.hltbProgress.completed} / {auth.hltbProgress.total}
+                </strong>
+              </span>
+              <i>
+                <b
+                  style={{
+                    width: `${(auth.hltbProgress.completed / Math.max(auth.hltbProgress.total, 1)) * 100}%`,
+                  }}
+                />
+              </i>
+              <small>
+                Results are cached for six months and appear as they arrive.
+              </small>
+            </div>
+          )}
         {auth.depotProgress &&
           auth.depotProgress.completed === auth.depotProgress.total &&
           auth.depotProgress.available > 0 &&
@@ -966,6 +1259,46 @@ function LibraryApp({
               <small>{formatStorageTarget(storageTargetMaximum)}</small>
             </span>
           </div>
+          <div className="completion-control">
+            <div>
+              <span>Remaining-time target</span>
+              <strong>
+                {completionMode === "main"
+                  ? "Main Story"
+                  : completionMode === "completionist"
+                    ? "Completionist"
+                    : "Main + Extras"}
+              </strong>
+            </div>
+            <input
+              aria-label="HowLongToBeat completion level"
+              type="range"
+              min="0"
+              max="2"
+              step="1"
+              value={
+                completionMode === "main"
+                  ? 0
+                  : completionMode === "main_extra"
+                    ? 1
+                    : 2
+              }
+              onChange={(event) =>
+                setCompletionMode(
+                  event.target.value === "0"
+                    ? "main"
+                    : event.target.value === "2"
+                      ? "completionist"
+                      : "main_extra",
+                )
+              }
+            />
+            <span className="completion-labels" aria-hidden="true">
+              <small>Main Story</small>
+              <small>Main + Extras</small>
+              <small>Completionist</small>
+            </span>
+          </div>
           <div className="library-toolbar">
             <div className="scope-tabs" aria-label="Library scope">
               {(["all", "installed", "uninstalled"] as LibraryScope[]).map(
@@ -1001,6 +1334,15 @@ function LibraryApp({
                 <span />
                 Hide incompatible
               </label>
+              <label className="shared-toggle">
+                <input
+                  type="checkbox"
+                  checked={showNonGames}
+                  onChange={(event) => setShowNonGames(event.target.checked)}
+                />
+                <span />
+                Show software &amp; tools
+              </label>
               <label className="select-control">
                 <span>Size source</span>
                 <select
@@ -1015,27 +1357,13 @@ function LibraryApp({
                   <option value="community">Community</option>
                 </select>
               </label>
-              <label className="select-control">
-                <span>Sort</span>
-                <select
-                  aria-label="Sort library"
-                  value={sort}
-                  onChange={(event) =>
-                    setSort(event.target.value as SortMode)
-                  }
-                >
-                  <option value="efficiency">Hours per GB</option>
-                  <option value="playtime">Playtime</option>
-                  <option value="size">Size</option>
-                  <option value="name">Name</option>
-                </select>
-              </label>
             </div>
           </div>
 
           <div className="table-caption">
             <span>
-              Showing <strong>{visibleGames.length}</strong> games
+              Showing <strong>{visibleGames.length}</strong>{" "}
+              {showNonGames ? "items" : "games"}
             </span>
             <p>
               Installed games always use Steam&apos;s exact local size.
@@ -1045,20 +1373,54 @@ function LibraryApp({
 
           <div className="game-table" role="table" aria-label="Steam library">
             <div className="game-row table-head" role="row">
-              <span role="columnheader">Game</span>
-              <span role="columnheader">Playtime</span>
-              <span role="columnheader">Storage</span>
+              <SortableHeader
+                active={sort === "name"}
+                direction={sortDirection}
+                label="Game"
+                onClick={() => updateSort("name")}
+              />
+              <SortableHeader
+                active={sort === "playtime"}
+                direction={sortDirection}
+                label="Playtime"
+                onClick={() => updateSort("playtime")}
+              />
+              <SortableHeader
+                active={sort === "remaining_hours"}
+                direction={sortDirection}
+                label="Remaining"
+                onClick={() => updateSort("remaining_hours")}
+              />
+              <SortableHeader
+                active={sort === "size"}
+                direction={sortDirection}
+                label="Storage"
+                onClick={() => updateSort("size")}
+              />
               <span role="columnheader">Cumulative</span>
-              <span role="columnheader">Hours / GB</span>
+              <SortableHeader
+                active={sort === "efficiency"}
+                direction={sortDirection}
+                label="Hours / GB"
+                onClick={() => updateSort("efficiency")}
+              />
+              <SortableHeader
+                active={sort === "remaining"}
+                direction={sortDirection}
+                label="Remaining / GB"
+                onClick={() => updateSort("remaining")}
+              />
               <span role="columnheader">Source</span>
               <span />
             </div>
             {visibleGames.map((game, index) => (
               <GameRow
                 cumulative={cumulativeSizes[index]}
+                completionMode={completionMode}
                 game={game}
                 key={game.appId}
                 maximumCumulativeSize={maximumCumulativeSize}
+                maximumRemainingHours={maximumRemainingHours}
                 maximumStorageSize={maximumStorageSize}
                 mode={sourceMode}
                 onCompare={() => setSourceMode("compare")}
@@ -1080,6 +1442,7 @@ function LibraryApp({
       {selectedGame && (
         <GameDrawer
           game={selectedGame}
+          completionMode={completionMode}
           mode={sourceMode}
           probe={auth.probe?.appId === selectedGame.appId ? auth.probe : null}
           onClose={() => setSelectedId(null)}
@@ -1153,10 +1516,39 @@ function SummaryCard({
   );
 }
 
+function SortableHeader({
+  active,
+  direction,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  direction: SortDirection;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`sortable-header${active ? " active" : ""}`}
+      role="columnheader"
+      aria-sort={active ? direction : "none"}
+      type="button"
+      onClick={onClick}
+    >
+      {label}
+      <span aria-hidden="true">
+        {active ? (direction === "ascending" ? "↑" : "↓") : "↕"}
+      </span>
+    </button>
+  );
+}
+
 function GameRow({
   cumulative,
+  completionMode,
   game,
   maximumCumulativeSize,
+  maximumRemainingHours,
   maximumStorageSize,
   mode,
   onCompare,
@@ -1164,8 +1556,10 @@ function GameRow({
   storageTargetSize,
 }: {
   cumulative: CumulativeSize;
+  completionMode: CompletionMode;
   game: LibraryGame;
   maximumCumulativeSize: number;
+  maximumRemainingHours: number;
   maximumStorageSize: number;
   mode: SourceMode;
   onCompare: () => void;
@@ -1174,6 +1568,16 @@ function GameRow({
 }) {
   const metrics = getGameMetrics(game, mode);
   const efficiencyBar = getEfficiencyBarWidths(metrics);
+  const remainingTime = getRemainingTime(game, completionMode);
+  const remainingMetrics = getRemainingMetrics(game, mode, completionMode);
+  const remainingBar = getEfficiencyBarWidths(remainingMetrics);
+  const remainingHoursBar = remainingTime
+    ? getAdaptiveBarWidths(
+        remainingTime.remainingHours,
+        remainingTime.remainingHours,
+        maximumRemainingHours,
+      )
+    : null;
   const storageBar = getStorageBarWidths(metrics, maximumStorageSize);
   const addedCumulativeSize = metrics?.lowerSizeBytes ?? 0;
   const cumulativeBar = getCumulativeBarWidths(
@@ -1213,12 +1617,68 @@ function GameRow({
             <span className="app-id">App {game.appId}</span>
             {game.installed && <em className="installed-tag">Installed</em>}
             {game.sharedOnly && <em className="shared-tag">Shared</em>}
+            {game.appType !== "game" && game.appType !== "unknown" && (
+              <em className="app-type-tag">{game.appType}</em>
+            )}
           </small>
         </span>
       </span>
       <span className="numeric-cell" role="cell">
         <strong>{formatPlaytime(game.playtimeMinutes)}</strong>
         <small>lifetime</small>
+      </span>
+      <span className="numeric-cell remaining-hours-cell" role="cell">
+        <strong>
+          {remainingTime
+            ? formatHltbDuration(remainingTime.remainingHours * 3600)
+            : "—"}
+        </strong>
+        {remainingHoursBar && (
+          <i
+            className={`metric-bar remaining-hours-bar${remainingHoursBar.capped ? " capped" : ""}`}
+            aria-label="Hours remaining"
+          >
+            <span
+              className="remaining-hours-base"
+              style={{ width: `${remainingHoursBar.basePercent}%` }}
+            />
+          </i>
+        )}
+        <small>
+          {remainingTime
+            ? (
+                <>
+                  left
+                  {remainingTime.fallbackExplanation && (
+                    <span
+                      className="hltb-fallback-info"
+                      aria-label={remainingTime.fallbackExplanation}
+                      title={remainingTime.fallbackExplanation}
+                    >
+                      i
+                    </span>
+                  )}
+                </>
+              )
+            : game.hltbStatus === "unmatched"
+              ? "no match"
+              : game.hltbStatus === "not_applicable"
+                ? "not applicable"
+                : game.hltbStatus === "matched"
+                  ? (
+                      <>
+                        no completion data
+                        <span
+                          className="hltb-fallback-info"
+                          aria-label={`${game.hltb?.gameName ?? game.name} was matched on HowLongToBeat, but it has no completion-time data.`}
+                          title={`${game.hltb?.gameName ?? game.name} was matched on HowLongToBeat, but it has no completion-time data.`}
+                        >
+                          i
+                        </span>
+                      </>
+                    )
+                  : "pending"}
+        </small>
       </span>
       <span className="numeric-cell" role="cell">
         <span className="storage-value-line">
@@ -1350,6 +1810,33 @@ function GameRow({
           </i>
         )}
       </span>
+      <span className="remaining-cell" role="cell">
+        <strong>{formatEfficiency(remainingMetrics)}</strong>
+        {remainingBar && (
+          <i
+            className="metric-bar remaining-bar"
+            aria-label={
+              remainingBar.rangePercent > 0
+                ? "Remaining hours per GB range"
+                : "Remaining hours per GB"
+            }
+          >
+            <span
+              className="remaining-base"
+              style={{ width: `${remainingBar.basePercent}%` }}
+            />
+            {remainingBar.rangePercent > 0 && (
+              <span
+                className="remaining-range"
+                style={{
+                  left: `${remainingBar.basePercent}%`,
+                  width: `${remainingBar.rangePercent}%`,
+                }}
+              />
+            )}
+          </i>
+        )}
+      </span>
       <span className="source-cell" role="cell">
         {metrics ? (
           metrics.sources.map((source) => (
@@ -1373,17 +1860,20 @@ function GameRow({
 }
 
 function GameDrawer({
+  completionMode,
   game,
   mode,
   probe,
   onClose,
 }: {
+  completionMode: CompletionMode;
   game: LibraryGame;
   mode: SourceMode;
   probe: DepotProbe | null;
   onClose: () => void;
 }) {
   const metrics = getGameMetrics(game, mode);
+  const remainingMetrics = getRemainingMetrics(game, mode, completionMode);
   return (
     <div className="drawer-backdrop" onMouseDown={onClose}>
       <aside
@@ -1402,6 +1892,9 @@ function GameDrawer({
         <div className="drawer-tags">
           {game.installed && <em className="installed-tag">Installed</em>}
           {game.sharedOnly && <em className="shared-tag">Steam Family</em>}
+          {game.appType !== "game" && game.appType !== "unknown" && (
+            <em className="app-type-tag">{game.appType}</em>
+          )}
         </div>
         <div className="drawer-metrics">
           <article>
@@ -1413,10 +1906,15 @@ function GameDrawer({
             <strong>{formatSizeMetric(metrics)}</strong>
           </article>
           <article>
-            <small>Value</small>
+            <small>Played per GB</small>
             <strong>{formatEfficiency(metrics)}</strong>
           </article>
+          <article>
+            <small>Remaining per GB</small>
+            <strong>{formatEfficiency(remainingMetrics)}</strong>
+          </article>
         </div>
+        <HltbSection game={game} />
         <section className="source-breakdown">
           <h3>Size sources</h3>
           <SourceLine
@@ -1497,6 +1995,132 @@ function GameDrawer({
         )}
       </aside>
     </div>
+  );
+}
+
+function HltbSection({ game }: { game: LibraryGame }) {
+  const [editing, setEditing] = useState(false);
+  const [query, setQuery] = useState(game.name);
+  const [results, setResults] = useState<HltbCandidate[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function search() {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    setSearching(true);
+    setError(null);
+    try {
+      setResults(await invoke<HltbCandidate[]>("search_hltb", { query: trimmed }));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function save(candidate: HltbCandidate | null) {
+    setSaving(true);
+    setError(null);
+    try {
+      await invoke("set_hltb_match", {
+        appId: game.appId,
+        candidate,
+      });
+      setEditing(false);
+      setResults([]);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="hltb-section">
+      <div className="hltb-heading">
+        <div>
+          <h3>HowLongToBeat</h3>
+          <small>
+            {game.hltb
+              ? `Matched to ${game.hltb.gameName}`
+              : game.hltbStatus === "not_applicable"
+                ? "Not searched because this Steam item is not a game"
+              : game.hltbStatus === "unmatched"
+                ? "No confident match"
+                : "Searching…"}
+          </small>
+        </div>
+        {game.hltbStatus !== "not_applicable" && (
+          <button type="button" onClick={() => setEditing((value) => !value)}>
+            {editing ? "Cancel" : game.hltb ? "Change match" : "Find match"}
+          </button>
+        )}
+      </div>
+      {game.hltb && (
+        <div className="hltb-times">
+          <span>
+            <small>Main Story</small>
+            <strong>{formatHltbDuration(game.hltb.mainSeconds)}</strong>
+          </span>
+          <span>
+            <small>Main + Extras</small>
+            <strong>{formatHltbDuration(game.hltb.mainExtraSeconds)}</strong>
+          </span>
+          <span>
+            <small>Completionist</small>
+            <strong>{formatHltbDuration(game.hltb.completionistSeconds)}</strong>
+          </span>
+        </div>
+      )}
+      {editing && (
+        <div className="hltb-editor">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void search();
+            }}
+          >
+            <input
+              aria-label="Search HowLongToBeat"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            <button type="submit" disabled={searching || saving}>
+              {searching ? "Searching…" : "Search"}
+            </button>
+          </form>
+          {results.length > 0 && (
+            <div className="hltb-results">
+              {results.map((candidate) => (
+                <button
+                  type="button"
+                  disabled={saving}
+                  key={candidate.gameId}
+                  onClick={() => void save(candidate)}
+                >
+                  <span>
+                    <strong>{candidate.gameName}</strong>
+                    <small>{candidate.platforms || "Platform unknown"}</small>
+                  </span>
+                  <b>{formatHltbDuration(candidate.mainExtraSeconds)}</b>
+                </button>
+              ))}
+            </div>
+          )}
+          <button
+            className="hltb-no-match"
+            type="button"
+            disabled={saving}
+            onClick={() => void save(null)}
+          >
+            Mark as no match
+          </button>
+          {error && <p className="hltb-editor-error">{error}</p>}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1602,7 +2226,7 @@ function formatCumulativeSize(cumulative: CumulativeSize) {
   );
 }
 
-function formatEfficiency(metrics: GameMetrics) {
+function formatEfficiency(metrics: EfficiencyMetric) {
   if (!metrics || metrics.lowerHoursPerGiB === null) return "—";
   if (
     metrics.upperHoursPerGiB !== null &&
@@ -1611,6 +2235,13 @@ function formatEfficiency(metrics: GameMetrics) {
     return `${metrics.lowerHoursPerGiB.toFixed(1)} → ${metrics.upperHoursPerGiB.toFixed(1)} h/GB`;
   }
   return `${metrics.lowerHoursPerGiB.toFixed(1)} h/GB`;
+}
+
+function formatHltbDuration(seconds: number | null) {
+  if (seconds === null) return "—";
+  const hours = seconds / 3600;
+  if (hours < 10) return `${hours.toFixed(1)}h`;
+  return `${Math.round(hours).toLocaleString()}h`;
 }
 
 function storageUnit(bytes: number) {

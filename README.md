@@ -18,7 +18,12 @@ The app is the Rust/Tauri successor to the original
   manual folder picker for nonstandard locations.
 - Estimate uninstalled games directly from Steam depot manifests.
 - Compare Steam depot estimates with the existing crowdsourced size database.
-- Filter, search, and sort by storage, playtime, or hours played per gigabyte.
+- Compare hours played and estimated hours remaining per gigabyte using
+  HowLongToBeat's Main Story, Main + Extras, or Completionist times.
+- Filter, search, and sort by storage, playtime, hours played, or hours
+  remaining per gigabyte.
+- Sort directly from the table headers and optionally include Steam software
+  and tools, which are hidden by default.
 - Set a library-size target and see how each game changes the cumulative total.
 - Hide shared-only or current-OS-incompatible games.
 - Inspect depot selection and source details for individual games.
@@ -67,6 +72,13 @@ or playtime.
 The app records the last contributed local size and only reconsiders a game
 after its `SizeOnDisk` changes by at least 100 MiB. Depot estimates never enter
 the contribution path.
+
+HowLongToBeat matches are cached locally for about six months because completion
+times change infrequently. Searches are spaced out, and the app pauses then
+resumes when the service supplies a retry delay. Exact Steam AppID matches are
+preferred; uncertain title matches are left blank and can be corrected in a
+game's details. HowLongToBeat is a separate service and no Steam account or
+playtime data is sent to it.
 
 The current development build stores the Steam refresh token in the per-user
 local application-data directory, with explicit user-only file permissions on
