@@ -6,6 +6,8 @@ installation sizes, then shows hours played per gigabyte across your Steam
 library. Using HowLongToBeat, it can also show an estimate of remaining hours
 of play per gigabyte.
 
+<img width="1507" height="695" alt="image" src="https://github.com/user-attachments/assets/c651addb-496d-4c2c-89bc-df8907175152" />
+
 The app is the Rust/Tauri successor to the original
 [Python project](https://github.com/JakeMartin-ICL/steam-storage-optimiser).
 
