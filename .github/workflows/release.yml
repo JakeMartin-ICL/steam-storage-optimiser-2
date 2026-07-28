@@ -21,21 +21,25 @@ jobs:
           - name: Linux x64
             platform: ubuntu-22.04
             args: "--bundles appimage,deb"
+            assetName: "Steam-Storage-Optimiser-v[version]-Linux-x64"
             rustTargets: ""
             signingIdentity: ""
           - name: Windows x64
             platform: windows-latest
             args: "--bundles nsis"
+            assetName: "Steam-Storage-Optimiser-v[version]-Windows-x64"
             rustTargets: ""
             signingIdentity: ""
           - name: macOS Apple Silicon
             platform: macos-latest
             args: "--target aarch64-apple-darwin --bundles dmg"
+            assetName: "Steam-Storage-Optimiser-v[version]-macOS-Apple-Silicon"
             rustTargets: "aarch64-apple-darwin,x86_64-apple-darwin"
             signingIdentity: "-"
           - name: macOS Intel
             platform: macos-latest
             args: "--target x86_64-apple-darwin --bundles dmg"
+            assetName: "Steam-Storage-Optimiser-v[version]-macOS-Intel"
             rustTargets: "aarch64-apple-darwin,x86_64-apple-darwin"
             signingIdentity: "-"
 
@@ -87,3 +91,4 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+          releaseAssetNamePattern: "${{ matrix.assetName }}[ext]"
