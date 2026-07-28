@@ -3,30 +3,25 @@
 Steam Storage Optimiser is a desktop app for deciding which games deserve
 space on your drive. It combines lifetime playtime with local or estimated
 installation sizes, then shows hours played per gigabyte across your Steam
-library.
+library. Using HowLongToBeat, it can also show an estimate of remaining hours
+of play per gigabyte.
 
 The app is the Rust/Tauri successor to the original
 [Python project](https://github.com/JakeMartin-ICL/steam-storage-optimiser).
 
 ## Features
 
-- Sign in by scanning Steam's QR code—no Steam Web API key required.
-- Browse owned and Steam Family games with playtime, artwork, platform
-  compatibility, and shared-library status.
+- Sign in by scanning Steam's QR code.
 - Read exact `SizeOnDisk` values for locally installed games.
 - Find standard Steam installations and libraries on additional drives, with a
   manual folder picker for nonstandard locations.
-- Estimate uninstalled games directly from Steam depot manifests.
-- Compare Steam depot estimates with the existing crowdsourced size database.
+- Estimate size of games not installed from Steam depot manifests and a crowdsourced
+  database.
 - Compare hours played and estimated hours remaining per gigabyte using
   HowLongToBeat's Main Story, Main + Extras, or Completionist times.
-- Filter, search, and sort by storage, playtime, hours played, or hours
-  remaining per gigabyte.
-- Sort directly from the table headers and optionally include Steam software
-  and tools, which are hidden by default.
 - Set a library-size target and see how each game changes the cumulative total.
-- Hide shared-only or current-OS-incompatible games.
-- Inspect depot selection and source details for individual games.
+  Eg: Set 1TB, sort by hours-remaining/GB, install all games above the point where
+  cumulative total exceeds 1TB.
 
 ## How sizes are calculated
 
@@ -44,18 +39,7 @@ close results to the Steam depot value. Large discrepancies are flagged because
 depot estimates can omit launcher or bootstrap files, while community
 observations can be old or come from another operating system.
 
-The cumulative column compares the visible library with a configurable storage
-target. Its initial suggestion is half the capacity of the filesystem
-containing the primary Steam installation; if that cannot be detected, it
-defaults to 1 TiB.
-
 ## Steam installation discovery
-
-The app checks the standard Steam data location on macOS, Steam's per-user
-registry entry and conventional Program Files locations on Windows, and common
-native, Flatpak, Snap, and XDG locations on Linux. Once the main Steam folder is
-found, every library listed in Steam's `libraryfolders.vdf` is scanned, including
-libraries on other drives.
 
 If automatic discovery misses a custom installation, use **Locate Steam** and
 select either the main Steam folder or its `steamapps` directory. The selection
@@ -69,27 +53,10 @@ disabled before login. A contribution contains only a public Steam AppID, game
 name, and observed local installation size—never the user's SteamID, profile,
 or playtime.
 
-The app records the last contributed local size and only reconsiders a game
-after its `SizeOnDisk` changes by at least 100 MiB. Depot estimates never enter
-the contribution path.
-
 HowLongToBeat matches are cached locally for about six months because completion
-times change infrequently. Searches are spaced out, and the app pauses then
-resumes when the service supplies a retry delay. Exact Steam AppID matches are
-preferred; uncertain title matches are left blank and can be corrected in a
-game's details. HowLongToBeat is a separate service and no Steam account or
-playtime data is sent to it.
-
-The current development build stores the Steam refresh token in the per-user
-local application-data directory, with explicit user-only file permissions on
-Unix systems. This convenience cache should be replaced with production
-credential storage before release.
+times change infrequently. The initial fetch can take a while for large libraries.
 
 ## Development
-
-The live Steam login, library, family ownership, community-size, and depot
-flows have been validated on macOS. Other desktop targets still need platform
-validation.
 
 Prerequisites:
 
@@ -109,25 +76,6 @@ Create a production bundle:
 ```sh
 npm run tauri build
 ```
-
-## Releases
-
-Pushing a version tag builds a draft GitHub Release containing:
-
-- an x64 NSIS installer (`.exe`) for Windows;
-- separate Apple Silicon and Intel disk images (`.dmg`) for macOS; and
-- an x64 AppImage plus Debian package (`.deb`) for Linux.
-
-The tag must match the version in `src-tauri/tauri.conf.json`. For example:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The initial macOS artifacts use an ad-hoc signature. Windows and macOS
-production signing can be added to the release workflow through repository
-secrets before publishing the draft.
 
 ## Installation
 
@@ -175,8 +123,3 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-The frontend is React and TypeScript. Steam integration, local discovery,
-caching, community compatibility, and depot selection are implemented in Rust.
-Technical findings are documented in
-[`docs/feasibility-spike.md`](docs/feasibility-spike.md) and
-[`docs/community-size-source.md`](docs/community-size-source.md).
